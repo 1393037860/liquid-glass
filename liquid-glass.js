@@ -1805,11 +1805,13 @@
   }
 
   const SELECTION_CHAR_BUDGET = 1500; // 每帧逐字重绘的字符预算(成本保护)
-  // 替换元素被选中时的覆盖范围:0 = 只内容盒,1 = 边框盒(含 padding)。
-  // 见 data-glass-selection-pad 的注释。
+  // 替换元素被选中时的覆盖范围:1 = 边框盒(含 padding),0 = 只内容盒。
+  // 默认 1:实测用户真实版 Chrome 会把 <img> 的 padding 一起刷上选中色
+  // (无头 Chrome 不刷 —— 它的选中绘制本来就与真实版不一致),而那张 iPhone
+  // 图有 padding:40px,两者留白宽度会差 40px。
   function getSelectionPadScale() {
     const value = parseFloat(root.dataset.glassSelectionPad || "");
-    return Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 0;
+    return Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 1;
   }
   // 替换元素被选中时:底色不透明(实测),图片内容再以这个透明度叠回去,
   // 于是"留白处是纯选中色、照片仍能隐约看见" —— 与 Chrome 的观感一致。
@@ -3396,7 +3398,7 @@
           "DPR 上限(<html>)": root.dataset.glassDprLimit ?? "(默认 1.25)",
           "图片选中范围(<html>)":
             root.dataset.glassSelectionPad ??
-            "(默认 0) 0=只内容盒, 1=含 padding",
+            "(默认 1) 1=含 padding, 0=只内容盒",
         };
         list.forEach((host, index) => {
           out["宿主" + (list.length > 1 ? index : "") + " " + (host.className || host.tagName)] = read(host);
