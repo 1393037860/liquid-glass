@@ -1697,16 +1697,17 @@
           height: Math.max(0, box.height - padTop - padBottom),
         };
         if (rect.width <= 0.5 || rect.height <= 0.5) return;
-        // ★ 底色是**不透明**的(实测:内容盒留白处 Ctrl+A 后是 #3264ce ≈ 选中色本身)。
-        //   "照片还能看见"不是因为底色半透明,而是 Chrome 把内容以
-        //   "选中色的色相/饱和度 + 照片自己的明度" 的方式重新着色了 ——
-        //   稍后 drawSelectionContentLayer() 用 canvas 的 "color" 混合模式复刻。
-        const background = resolveSelectionBackground(
-          node,
-          getComputedStyle(node, "::selection"),
-        );
-        pendingReplacedContent.push({ node, rect, background });
-        items.push({ rect, background });
+        // ★ 底色是**不透明**的(实测:内容盒留白处 Ctrl+A 后是 #3264ce ≈ 选中色本身),
+        //   而"照片还能看见"是因为 Chrome 把图片内容重新叠在了选中色之上 ——
+        //   所以这里先记下节点,稍后用 REPLACED_CONTENT_ALPHA 把内容补画回去。
+        pendingReplacedContent.push(node);
+        items.push({
+          rect,
+          background: resolveSelectionBackground(
+            node,
+            getComputedStyle(node, "::selection"),
+          ),
+        });
       });
     }
 
@@ -1732,50 +1733,39 @@
     });
   }
 
-  // 替换元素被选中:底色已按 Chrome 的实测结果画成**不透明**选中色,
-  // 这里再把内容以"选中色的色相/饱和度 + 内容自己的明度"重新着色 ——
-  // 用 canvas 的 "color" 混合模式正好就是这个语义:
-  //   照片区域 → 暗蓝,照片细节仍可见(实测 Chrome #1c40a8,原来用 34% 透明叠是 #435a9f,偏亮)
-  //   留白区域 → 底色本来就是同一个纯选中色,同色再混一次不变 ✓
+  // 选中底色是不透明的,替换元素(img/video/canvas)的内容要按
+  // REPLACED_CONTENT_ALPHA 重新叠回去 —— Chrome 就是这样:留白处是纯选中色,
+  // 而图片本身仍能隐约看见。
   function drawSelectionContentLayer(ctx, canvasRect, dpr, state) {
     if (!pendingReplacedContent.length) return;
 
-    pendingReplacedContent.forEach((item) => {
-      const { node, rect, background } = item;
+    pendingReplacedContent.forEach((node) => {
       if (!node || !node.isConnected) return;
-      if (!intersects(rect, canvasRect)) return;
-
-      const x = (rect.left - canvasRect.left) * dpr;
-      const y = (rect.top - canvasRect.top) * dpr;
-      const w = rect.width * dpr;
-      const h = rect.height * dpr;
-
-      // 1) 内容按原样重新画一遍(不透明),把被底色盖住的内容恢复出来
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(x, y, w, h);
-      ctx.clip();
       if (node instanceof HTMLImageElement) {
-        drawImageElement(ctx, node, canvasRect, dpr, state.skipUnsafeImages);
-      } else {
-        const box = node.getBoundingClientRect();
-        try {
-          ctx.drawImage(
-            node,
-            (box.left - canvasRect.left) * dpr,
-            (box.top - canvasRect.top) * dpr,
-            box.width * dpr,
-            box.height * dpr,
-          );
-        } catch (error) {}
+        drawImageElement(
+          ctx,
+          node,
+          canvasRect,
+          dpr,
+          state.skipUnsafeImages,
+          REPLACED_CONTENT_ALPHA,
+        );
+        return;
       }
-      ctx.restore();
-
-      // 2) 用 "color" 混合模式刷选中色 → 取选中色的色相/饱和度 + 内容的明度
+      // 视频 / 普通 canvas:直接按矩形半透明重画一次
+      const rect = node.getBoundingClientRect();
+      if (!rect.width || !rect.height || !intersects(rect, canvasRect)) return;
       ctx.save();
-      ctx.globalCompositeOperation = "color";
-      ctx.fillStyle = background;
-      ctx.fillRect(x, y, w, h);
+      ctx.globalAlpha = REPLACED_CONTENT_ALPHA;
+      try {
+        ctx.drawImage(
+          node,
+          (rect.left - canvasRect.left) * dpr,
+          (rect.top - canvasRect.top) * dpr,
+          rect.width * dpr,
+          rect.height * dpr,
+        );
+      } catch (error) {}
       ctx.restore();
     });
   }
@@ -1806,8 +1796,10 @@
   }
 
   const SELECTION_CHAR_BUDGET = 1500; // 每帧逐字重绘的字符预算(成本保护)
-  // collectSelectionRects 顺带收集"需要重新着色内容"的替换元素
-  // (每项:{ node, rect, background })
+  // 替换元素被选中时:底色不透明(实测),图片内容再以这个透明度叠回去,
+  // 于是"留白处是纯选中色、照片仍能隐约看见" —— 与 Chrome 的观感一致。
+  const REPLACED_CONTENT_ALPHA = 0.34;
+  // collectSelectionRects 顺带收集"需要补画内容"的替换元素
   let pendingReplacedContent = [];
 
   // 把选中文字按高亮前景色重绘在最上层。
