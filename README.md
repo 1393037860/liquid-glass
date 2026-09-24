@@ -100,11 +100,23 @@ liquid-glass/
 | `data-glass-alpha` | 宿主元素 | 玻璃整体不透明度倍数,默认 `1`。 |
 | `data-glass-isolate="true"` | 宿主元素 | 隔离模式:只采集与宿主相交的内容,适合弹窗等悬浮面板。 |
 | `data-glass-capture` | `<html>` | 采集范围选择器;`all` / `*` 表示全页面,也可写自定义选择器(如 `.hero *`)。 |
+| `data-glass-backdrop="snapshot"` | `<html>` | 启用**快照背景**(见下);不写则使用默认的镜像重绘。任何失败都会自动回退并打印一条 info 日志。 |
 | `data-theme="dark"` | `<html>` | 切换深色配色,影响背景色、阴影与光斑。 |
 | `data-liquid-glass` 上的 `border-radius` | CSS | 决定玻璃圆角;高度的一半即为胶囊形。 |
 | `pdaim:liquid-refresh` | 自定义事件 | 在 `document` 上派发该事件可强制刷新纹理缓存(动态增删内容后调用)。 |
 
 计算样式、`MutationObserver` 与图片 / 字体的加载完成事件已自动处理大部分 DOM 变化;内容结构大改时可手动派发刷新事件。
+
+### 两种背景来源
+
+| | 镜像重绘(默认) | 快照背景 `data-glass-backdrop="snapshot"` |
+| --- | --- | --- |
+| 原理 | 读取计算样式,手工把盒模型 / 渐变 / 文字画到 2D Canvas | `foreignObject` 序列化静态内容,**交给浏览器自己渲染**成位图 |
+| 覆盖范围 | 需要逐条实现 CSS 文字规范 | 伪元素(`::before/::after`)、渐变文字、`text-decoration`、`white-space`、`writing-mode`、逐角圆角、`box-shadow`、`filter`、`transform` 全部原生正确 |
+| 代价 | — | 一次光栅化约 25ms(DPR 1),结构 / 尺寸 / 主题变化后防抖重建;滚动只做一次 blit |
+| 自动回退 | — | CSS 不可读、CSS 含外链 `url()`、XML / 加载失败、快照被污染、纹理超 4096×8192 时自动回退 |
+
+快照只负责**静态层**;图片、`<video>`、`<canvas>`、`position: fixed` 子树、文本选区、光标仍由覆盖层每帧绘制。踩过的三个 Chrome 坑(避免重复踩):必须用 `XMLSerializer`(否则 `<br>`/`<img>` 让整个 SVG 解析失败)、必须用 `data:` URL(用 `blob:` 会被判定跨源,canvas / WebGL 全读不了)、SVG 内不能有外链资源(会污染快照)。另外快照必须按**布局视口** `documentElement.clientWidth` 排版(用 `innerWidth` 会多算滚动条,居中内容整体偏移半个滚动条宽)。
 
 ## 技术原理简述
 
@@ -127,5 +139,9 @@ liquid-glass/
 
 ## 更新日志
 
+- **文字排版修复**——`splitWrapUnits()` 之前只看"有没有空格",中西混排(如 `RGB 三通道…`)会把整段中文当成不可断行的单元,导致换行位置与浏览器不一致,超宽的行还会被 `fillText` 的 `maxWidth` 横向压扁。现在中文逐字断行、西文按单词断行,折行文本改走 `Range` 逐字测量还原浏览器真实行盒,并去掉 `maxWidth` 压缩。
+- **文本选中态还原**——原生选区不在 DOM 也不在计算样式里(Chrome 的 `::selection` 默认值是 `transparent`),新增选区层用 `Range.getClientRects()` 取几何 + 系统高亮色(`Highlight` 系统色关键字),并在 `selectionchange` 时重绘。
+- **新增快照背景**——`data-glass-backdrop="snapshot"` 让浏览器自己渲染静态层,解决伪元素 / 渐变文字 / 装饰线 / `white-space` / 阴影 / `transform` 等镜像重绘覆盖不到的 CSS;图片、视频、canvas、固定定位子树、选区、光标仍由覆盖层绘制,失败自动回退。
+- **视频与普通 canvas**——不再被画成空盒子(`drawMediaElement`),播放中的视频会驱动背景重绘,玻璃里能跟着动。
 - **修复:拖拽玻璃经过图片时不显示真实图片**——背景纹理的帧签名只覆盖滚动 / 尺寸 / 主题 / 配色,图片在首次绘制时若尚未加载完成,就会被 `drawImageFallback` 的占位图画进纹理并永久缓存。现在监听图片的 `load` / `error` 与 `document.fonts.ready`,资源异步到达后自动失效缓存并重绘。
 - **初始版本**——液态玻璃 Header、玻璃弹窗、尺寸控制面板、拖拽移动、色散折射与 Bayer 抖动着色器。

@@ -618,11 +618,39 @@
     return Number.isFinite(parsed) ? parsed : fontSize * 1.25;
   }
 
+  // 中日韩文字在两字之间就可以断行,西文必须按单词断行。
+  // 之前只看「有没有空格」:像 "RGB 三通道以不同偏移量…" 这种中西混排,
+  // 因为有空格就整体按单词切分,整段中文变成了一个不可断行的单元,
+  // 于是换行位置错、超宽的一行还会被 fillText 的 maxWidth 横向压扁。
+  const CJK_CHAR_PATTERN =
+    /[\u1100-\u11FF\u2E80-\u2FFF\u3000-\u303F\u3040-\u30FF\u3130-\u318F\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF00-\uFFEF]/;
+
   function splitWrapUnits(text) {
-    if (/\s/.test(text)) {
-      return text.split(/(\s+)/).filter(Boolean);
-    }
-    return Array.from(text);
+    const units = [];
+    let word = "";
+
+    const flushWord = () => {
+      if (word) {
+        units.push(word);
+        word = "";
+      }
+    };
+
+    // Array.from 保证代理对(emoji 等)不会被拆成两半
+    Array.from(text).forEach((char) => {
+      if (/\s/.test(char)) {
+        flushWord();
+        units.push(char);
+      } else if (CJK_CHAR_PATTERN.test(char)) {
+        flushWord();
+        units.push(char);
+      } else {
+        word += char;
+      }
+    });
+    flushWord();
+
+    return units;
   }
 
   function wrapCanvasText(ctx, text, maxWidth) {
@@ -630,17 +658,33 @@
     const lines = [];
     let line = "";
 
+    const pushLine = (value) => {
+      const clean = value.replace(/\s+$/, "");
+      if (clean) lines.push(clean);
+    };
+
     units.forEach((unit) => {
       const next = line ? line + unit : unit;
       if (line && ctx.measureText(next).width > maxWidth) {
-        lines.push(line.trimEnd());
-        line = unit.trimStart();
+        pushLine(line);
+        line = unit.replace(/^\s+/, "");
       } else {
         line = next;
       }
+
+      // 单个单元本身就超宽(超长英文单词、URL 等):按字符硬断,
+      // 否则这一行会被 fillText 的 maxWidth 参数压缩变形。
+      while (line.length > 1 && ctx.measureText(line).width > maxWidth) {
+        let cut = line.length - 1;
+        while (cut > 1 && ctx.measureText(line.slice(0, cut)).width > maxWidth) {
+          cut -= 1;
+        }
+        pushLine(line.slice(0, cut));
+        line = line.slice(cut);
+      }
     });
 
-    if (line) lines.push(line.trim());
+    if (line.trim()) lines.push(line.trim());
     return lines.length ? lines : [text];
   }
 
@@ -790,8 +834,11 @@
     const isMultiline =
       !options.text && text.length > 18 && rect.height > lineHeight * 1.45;
 
+    // 折行文本优先走逐字测量(Range)的真实排版:浏览器怎么断行、每行多宽,
+    // 就照着画,不会出现换行位置不同、行被 maxWidth 压扁的问题。
+    // 手动换行只作为兜底(文本过长或取不到文本节点时)。
     if (
-      (options.precise || isCompositeTextElement(element)) &&
+      (options.precise || isMultiline || isCompositeTextElement(element)) &&
       !options.text &&
       drawTextByRangeRects(ctx, element, canvasRect, dpr, style, options)
     ) {
@@ -828,7 +875,8 @@
       ctx.textAlign = align === "right" || align === "center" ? align : "left";
       ctx.textBaseline = "middle";
       lines.slice(0, maxLines).forEach((line) => {
-        ctx.fillText(line, drawX, drawY, innerWidth);
+        // 不传 maxWidth:换行已经按宽度算好,再传一次会让超宽的行被横向压扁
+        ctx.fillText(line, drawX, drawY);
         drawY += lineHeight * dpr;
       });
     } else {
@@ -1455,8 +1503,450 @@
     return canvasRect.top < 180 && canvasRect.bottom > -40;
   }
 
-  function drawUnderlyingContent(ctx, canvasRect, dpr, state, host) {
+  // ===== 文本选中态 =====
+  // 原生选区不在 DOM 里,也不体现在计算样式里(Chrome 的 ::selection 默认值
+  // 读到的是 transparent),它是合成器直接画的。所以镜像必须自己还原:
+  // 几何用 Range.getClientRects(),颜色优先取页面自定义的 ::selection,
+  // 否则取系统高亮色(CSS 的 Highlight 系统色关键字)。
+  let systemHighlightColor = null;
+
+  function getSystemHighlightColor() {
+    if (systemHighlightColor) return systemHighlightColor;
+
+    let resolved = "";
+    try {
+      const probe = document.createElement("div");
+      probe.setAttribute("aria-hidden", "true");
+      probe.style.cssText =
+        "position:absolute;left:-9999px;top:-9999px;width:0;height:0;background-color:Highlight;";
+      document.body.appendChild(probe);
+      resolved = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+    } catch (error) {
+      resolved = "";
+    }
+
+    systemHighlightColor = isTransparentColor(resolved)
+      ? "rgba(0, 120, 215, 0.85)"
+      : resolved;
+    return systemHighlightColor;
+  }
+
+  function collectSelectionRects() {
+    const selection = window.getSelection?.();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return [];
+
+    const items = [];
+
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      const range = selection.getRangeAt(index);
+      if (range.collapsed) continue;
+
+      const container = range.commonAncestorContainer;
+      const element =
+        container.nodeType === 1 ? container : container.parentElement;
+      // 玻璃自身内部的选中不参与镜像
+      if (!element || element.closest?.("[data-liquid-glass]")) continue;
+
+      const selectionStyle = getComputedStyle(element, "::selection");
+      const background = isTransparentColor(selectionStyle.backgroundColor)
+        ? getSystemHighlightColor()
+        : selectionStyle.backgroundColor;
+
+      const rects = range.getClientRects();
+      for (let rectIndex = 0; rectIndex < rects.length; rectIndex += 1) {
+        const rect = rects[rectIndex];
+        if (rect.width <= 0.5 || rect.height <= 0.5) continue;
+        items.push({ rect, background });
+      }
+    }
+
+    return items;
+  }
+
+  // 选区底色画在文字下面,和浏览器的绘制顺序一致
+  function drawSelectionLayer(ctx, canvasRect, dpr) {
+    const items = collectSelectionRects();
+    if (!items.length) return;
+
+    items.forEach((item) => {
+      if (!intersects(item.rect, canvasRect)) return;
+      ctx.save();
+      ctx.fillStyle = item.background;
+      ctx.fillRect(
+        (item.rect.left - canvasRect.left) * dpr,
+        (item.rect.top - canvasRect.top) * dpr,
+        item.rect.width * dpr,
+        item.rect.height * dpr,
+      );
+      ctx.restore();
+    });
+  }
+
+  // ===== 快照背景 =====
+  // 手动镜像重绘只能覆盖 CSS 的一个子集:伪元素(::before/::after)、渐变文字
+  // (-webkit-text-fill-color + background-clip:text)、text-decoration、
+  // white-space、writing-mode、逐角圆角、box-shadow、filter、transform……
+  // 这些全都要一条条补,永远补不完。用 foreignObject 把静态内容序列化后交给
+  // 浏览器自己渲染,这一整类问题一次性消失。
+  //
+  // Chrome 上实测到的三个坑:
+  //   1) 必须用 XMLSerializer。innerHTML 出来的 <br> / <img> 不是合法 XML,
+  //      整个 SVG 会直接解析失败(image load error)。
+  //   2) 必须用 data: URL。blob: URL 会让 foreignObject 快照被判定为跨源,
+  //      canvas.getImageData 与 WebGL texImage2D 全部 SecurityError。
+  //   3) SVG 里任何外链资源都会污染快照。所以图片 / 视频 / canvas 不放进快照,
+  //      由覆盖层每帧绘制(它们本来就需要动态更新);CSS 里出现 url(...)
+  //      外链时直接禁用快照,回退到镜像方案。
+  const SNAPSHOT = {
+    requested: root.dataset.glassBackdrop === "snapshot",
+    enabled: root.dataset.glassBackdrop === "snapshot",
+    ready: false,
+    building: false,
+    version: 0,
+    builtVersion: -1,
+    builtTheme: "",
+    canvas: null,
+    reason: "",
+    timer: null,
+  };
+
+  let overlayCacheDirty = true;
+  let overlayFixedRoots = [];
+  let overlayMedia = [];
+
+  function disableSnapshotBackdrop(reason) {
+    SNAPSHOT.enabled = false;
+    SNAPSHOT.ready = false;
+    SNAPSHOT.building = false;
+    SNAPSHOT.canvas = null;
+    SNAPSHOT.reason = reason;
+    if (window.console && console.info) {
+      console.info("[liquid-glass] 快照背景不可用,已回退到镜像重绘: " + reason);
+    }
+  }
+
+  function requestSnapshotBackdrop(delay) {
+    if (!SNAPSHOT.requested) return;
+    SNAPSHOT.version += 1;
+    if (SNAPSHOT.timer) clearTimeout(SNAPSHOT.timer);
+    // 结构变动往往连着一串,合并成一次重建
+    SNAPSHOT.timer = setTimeout(() => {
+      SNAPSHOT.timer = null;
+      buildSnapshotBackdrop();
+    }, typeof delay === "number" ? delay : 300);
+  }
+
+  function refreshOverlayCache() {
+    overlayFixedRoots = [];
+    overlayMedia = [];
+    document.body.querySelectorAll("*").forEach((element) => {
+      if (element.closest?.("[data-liquid-glass]")) return;
+      if (element instanceof HTMLVideoElement) {
+        overlayMedia.push(element);
+        return;
+      }
+      if (!SNAPSHOT.requested) return;
+      if (overlayFixedRoots.some((root) => root.contains(element))) return;
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") return;
+      if (style.position === "fixed") overlayFixedRoots.push(element);
+    });
+    overlayCacheDirty = false;
+  }
+
+  // 快照模式下的覆盖层 = 图片 / 视频 / canvas + 固定定位子树(快照里被扣掉了)
+  function isSnapshotOverlayTarget(element) {
+    if (element instanceof HTMLImageElement) return true;
+    if (element instanceof HTMLVideoElement) return true;
+    if (element instanceof HTMLCanvasElement)
+      return !element.classList.contains("liquid-glass-canvas");
+    return overlayFixedRoots.some(
+      (root) => root === element || root.contains(element),
+    );
+  }
+
+  function mediaIsPlaying() {
+    for (let index = 0; index < overlayMedia.length; index += 1) {
+      const element = overlayMedia[index];
+      if (
+        element.isConnected &&
+        !element.paused &&
+        !element.ended &&
+        element.readyState >= 2
+      )
+        return true;
+    }
+    return false;
+  }
+
+  function drawMediaElement(ctx, element, canvasRect, dpr) {
+    const rect = element.getBoundingClientRect();
+    if (!rect.width || !rect.height || !intersects(rect, canvasRect)) return;
+    if (element instanceof HTMLVideoElement && element.readyState < 2) return;
+
+    ctx.save();
+    ctx.globalAlpha = getCompositedOpacity(element);
+    try {
+      ctx.drawImage(
+        element,
+        (rect.left - canvasRect.left) * dpr,
+        (rect.top - canvasRect.top) * dpr,
+        rect.width * dpr,
+        rect.height * dpr,
+      );
+    } catch (error) {}
+    ctx.restore();
+  }
+
+  function collectPageCss() {
+    let css = "";
+    for (const sheet of document.styleSheets) {
+      try {
+        for (const rule of sheet.cssRules) css += rule.cssText + "\n";
+      } catch (error) {
+        // 跨源样式表读不到规则 → 快照会缺样式,直接放弃
+        return "";
+      }
+    }
+    return css;
+  }
+
+  const TRANSPARENT_PIXEL =
+    "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+
+  // 图片/视频/canvas/iframe 的真实像素由覆盖层绘制,但**必须保留它们的占位盒子**:
+  // 像 <img> 靠 CSS aspect-ratio 占位的情况,直接删掉元素会让整页排版塌陷,
+  // 快照里的内容整体上移 —— 表现就是"玻璃拖到图片顶部,折射出来的却是下面的文字"。
+  function keepSnapshotBox(live, node) {
+    const rect = live.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width));
+    const height = Math.max(1, Math.round(rect.height));
+    node.setAttribute("width", String(width));
+    node.setAttribute("height", String(height));
+
+    if (node instanceof HTMLImageElement) {
+      // 换成透明像素:尺寸由上面的 width/height 与 CSS 决定,且不产生外链请求
+      node.setAttribute("src", TRANSPARENT_PIXEL);
+      node.removeAttribute("srcset");
+      node.removeAttribute("sizes");
+      node.removeAttribute("loading");
+      node.removeAttribute("decoding");
+      return;
+    }
+    if (node instanceof HTMLVideoElement) {
+      node.removeAttribute("src");
+      node.removeAttribute("poster");
+      node.querySelectorAll("source").forEach((source) => source.remove());
+      return;
+    }
+    if (node instanceof HTMLIFrameElement) {
+      node.removeAttribute("src");
+    }
+  }
+
+  function buildSnapshotSvg(layoutWidth, layoutHeight, dpr) {
+    const css = collectPageCss();
+    if (!css) return "";
+    // 外链背景图 / 字体资源会污染快照
+    if (/url\(\s*['"]?(?!data:)/i.test(css)) return "";
+
+    // ★ 必须用布局视口宽度(clientWidth,不含滚动条),不能用 window.innerWidth。
+    //   innerWidth 把滚动条算进去了,快照里没有滚动条 → 内容会按更宽的视口重新排版,
+    //   居中的内容整体右移半个滚动条宽(约 7.5px),表现就是"玻璃里的边框整体偏右"。
+    const width = Math.max(1, Math.round(layoutWidth));
+    const height = Math.max(1, Math.round(layoutHeight));
+
+    const clone = document.body.cloneNode(true);
+    // 与实时树平行遍历:只在克隆侧 remove,两边的下标始终一一对应
+    const liveAll = [document.body, ...document.body.querySelectorAll("*")];
+    const cloneAll = [clone, ...clone.querySelectorAll("*")];
+
+    for (let index = 0; index < liveAll.length; index += 1) {
+      const live = liveAll[index];
+      const node = cloneAll[index];
+      if (!live || !node) continue;
+      if (
+        live.tagName === "SCRIPT" ||
+        live.tagName === "NOSCRIPT" ||
+        live.closest?.("[data-liquid-glass]")
+      ) {
+        node.remove();
+        continue;
+      }
+      // 媒体元素只挖掉像素来源,保留盒子(见 keepSnapshotBox 注释)
+      if (
+        live instanceof HTMLImageElement ||
+        live instanceof HTMLVideoElement ||
+        live instanceof HTMLCanvasElement ||
+        live instanceof HTMLIFrameElement
+      ) {
+        keepSnapshotBox(live, node);
+        continue;
+      }
+      const style = getComputedStyle(live);
+      // 固定定位在整页光栅化里会被钉在文档原点,交给覆盖层按视口位置画
+      if (style.display === "none" || style.position === "fixed") node.remove();
+    }
+
+    const bodyStyle = getComputedStyle(document.body);
+    const wrap = document.createElement("div");
+    wrap.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+    wrap.setAttribute(
+      "style",
+      [
+        "margin:0",
+        "width:" + width + "px",
+        "min-height:" + height + "px",
+        "font-family:" + bodyStyle.fontFamily,
+        "font-size:" + bodyStyle.fontSize,
+        "font-weight:" + bodyStyle.fontWeight,
+        "line-height:" + bodyStyle.lineHeight,
+        "color:" + bodyStyle.color,
+        "background-color:" + bodyStyle.backgroundColor,
+        "letter-spacing:" + bodyStyle.letterSpacing,
+        "text-align:" + bodyStyle.textAlign,
+      ].join(";"),
+    );
+
+    const styleEl = document.createElement("style");
+    styleEl.textContent = css;
+    wrap.appendChild(styleEl);
+    while (clone.firstChild) wrap.appendChild(clone.firstChild);
+
+    // ★ 必须 XMLSerializer:HTML 序列化的 <br>/<img> 不是合法 XML
+    const inner = new XMLSerializer().serializeToString(wrap);
+    // ★ 必须用 viewBox 把「光栅化分辨率」和「CSS 布局尺寸」分开:
+    //   只用 CSS 尺寸当 SVG 宽高的话,浏览器按 CSS 像素光栅化,再放大 dpr 倍
+    //   就是一次上采样 —— 文字变粗变虚、容器边缘发毛。
+    const rasterWidth = Math.round(width * dpr);
+    const rasterHeight = Math.round(height * dpr);
+    return (
+      '<svg xmlns="http://www.w3.org/2000/svg" width="' +
+      rasterWidth +
+      '" height="' +
+      rasterHeight +
+      '" viewBox="0 0 ' +
+      width +
+      " " +
+      height +
+      '"><foreignObject x="0" y="0" width="' +
+      width +
+      '" height="' +
+      height +
+      '">' +
+      inner +
+      "</foreignObject></svg>"
+    );
+  }
+
+  function buildSnapshotBackdrop() {
+    if (!SNAPSHOT.enabled || SNAPSHOT.building) return;
+    if (SNAPSHOT.ready && SNAPSHOT.builtVersion === SNAPSHOT.version) return;
+
+    const dpr = Math.min(
+      window.devicePixelRatio || 1,
+      isLiteGlassMode() ? MOBILE_GLASS_DPR_LIMIT : GLASS_DPR_LIMIT,
+    );
+    // 布局尺寸:视口宽度用 clientWidth(不含滚动条),这样快照里的排版范围
+    // 与真实页面的排版视口完全一致,居中的内容不会偏移。
+    const layoutWidth = Math.max(
+      1,
+      Math.round(document.documentElement.clientWidth),
+    );
+    const layoutHeight = Math.max(
+      1,
+      Math.round(document.documentElement.scrollHeight),
+    );
+    const rasterWidth = Math.round(layoutWidth * dpr);
+    const rasterHeight = Math.round(layoutHeight * dpr);
+    if (rasterWidth > 4096 || rasterHeight > 8192) {
+      disableSnapshotBackdrop("too-large:" + rasterWidth + "x" + rasterHeight);
+      return;
+    }
+    // 快照画布与视口纹理同宽(innerWidth*dpr),右侧滚动条那一条留空
+    const width = Math.max(1, Math.round(window.innerWidth * dpr));
+    const height = rasterHeight;
+
+    let svg = "";
+    try {
+      svg = buildSnapshotSvg(layoutWidth, layoutHeight, dpr);
+    } catch (error) {
+      disableSnapshotBackdrop("build:" + (error && error.name));
+      return;
+    }
+    if (!svg) {
+      disableSnapshotBackdrop("css-unreadable-or-external-url");
+      return;
+    }
+
+    SNAPSHOT.building = true;
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const snapshotCtx = canvas.getContext("2d");
+      try {
+        // 1:1 绘制:SVG 已按 rasterWidth×rasterHeight(设备像素)光栅化,
+        // 这里再缩放一次就等于二次上采样,会把边缘和文字弄糊。
+        snapshotCtx.drawImage(image, 0, 0);
+        // 被污染(有外链资源)会在这里抛 SecurityError → 回退镜像方案
+        snapshotCtx.getImageData(0, 0, 1, 1);
+      } catch (error) {
+        disableSnapshotBackdrop("tainted:" + (error && error.name));
+        return;
+      }
+      SNAPSHOT.canvas = canvas;
+      SNAPSHOT.ready = true;
+      SNAPSHOT.building = false;
+      SNAPSHOT.builtVersion = SNAPSHOT.version;
+      SNAPSHOT.builtTheme = root.dataset.theme || "";
+      underlyingCacheDirty = true;
+      overlayCacheDirty = true;
+      invalidateGlassFrame();
+    };
+    image.onerror = () => disableSnapshotBackdrop("image-load");
+    // ★ 必须 data: URL:blob: 会让快照被判为跨源,读不了像素
+    image.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  }
+
+  function drawSnapshotBackdrop(ctx, rect, dpr) {
+    const canvas = SNAPSHOT.canvas;
+    if (!SNAPSHOT.ready || !canvas) return false;
+
+    const sourceY = Math.max(0, Math.round(window.scrollY * dpr));
+    const copyHeight = Math.min(
+      canvas.height - sourceY,
+      Math.round(rect.height * dpr),
+    );
+    if (copyHeight <= 0) return false;
+    const copyWidth = Math.min(canvas.width, Math.round(rect.width * dpr));
+
+    ctx.drawImage(
+      canvas,
+      0,
+      sourceY,
+      copyWidth,
+      copyHeight,
+      0,
+      0,
+      copyWidth,
+      copyHeight,
+    );
+    return true;
+  }
+
+  function drawUnderlyingContent(
+    ctx,
+    canvasRect,
+    dpr,
+    state,
+    host,
+    overlayOnly,
+  ) {
     if (underlyingCacheDirty) refreshUnderlyingCache();
+    if (overlayCacheDirty) refreshOverlayCache();
     const elements = underlyingElements.filter(
       (element) => element.isConnected,
     );
@@ -1464,6 +1954,17 @@
 
     elements.forEach((element) => {
       if (shouldSkipUnderlyingElement(element, host)) return;
+      if (overlayOnly && !isSnapshotOverlayTarget(element)) return;
+      // 视频与普通 canvas 直接当位图贴上去(镜像那套只会把它们画成空盒子)
+      if (
+        element instanceof HTMLVideoElement ||
+        (element instanceof HTMLCanvasElement &&
+          !element.classList.contains("liquid-glass-canvas") &&
+          !element.classList.contains("pdaim-line-field"))
+      ) {
+        drawMediaElement(ctx, element, canvasRect, dpr);
+        return;
+      }
       if (
         element instanceof HTMLCanvasElement &&
         (element.classList.contains("liquid-glass-canvas") ||
@@ -1482,8 +1983,12 @@
       drawImageElement(ctx, image, canvasRect, dpr, state.skipUnsafeImages);
     });
 
+    // 选区底色要压在文字下面,所以放在文字两趟之前
+    drawSelectionLayer(ctx, canvasRect, dpr);
+
     elements.forEach((element) => {
       if (shouldSkipUnderlyingElement(element, host)) return;
+      if (overlayOnly && !isSnapshotOverlayTarget(element)) return;
       if (element.children.length > 0) return;
       if (element instanceof HTMLImageElement) return;
       if (element instanceof HTMLCanvasElement) return;
@@ -1498,6 +2003,7 @@
 
     elements.forEach((element) => {
       if (shouldSkipUnderlyingElement(element, host)) return;
+      if (overlayOnly && !isSnapshotOverlayTarget(element)) return;
       if (!isCompositeTextElement(element)) return;
       drawTextElement(ctx, element, canvasRect, dpr, { precise: true });
     });
@@ -1641,7 +2147,12 @@
     }
 
     ctx.globalAlpha = 1;
-    drawUnderlyingContent(ctx, rect, dpr, state, host);
+    // 快照背景可用时:静态层直接用浏览器渲染好的位图,动态内容交给覆盖层
+    const usedSnapshot =
+      host === EXCLUDE_ALL_GLASS_HOSTS &&
+      SNAPSHOT.ready &&
+      drawSnapshotBackdrop(ctx, rect, dpr);
+    drawUnderlyingContent(ctx, rect, dpr, state, host, usedSnapshot);
     return true;
   }
 
@@ -2342,6 +2853,15 @@
     const effectiveGridY =
       paintState.gridOpacity > 0.001 ? paintState.gridY : 0;
 
+    // 主题切换会改变整页配色,快照需要重建
+    if (
+      SNAPSHOT.enabled &&
+      SNAPSHOT.ready &&
+      SNAPSHOT.builtTheme !== (root.dataset.theme || "")
+    ) {
+      requestSnapshotBackdrop();
+    }
+
     const nextFrameSignature = [
       metrics.viewportWidth,
       metrics.viewportHeight,
@@ -2357,6 +2877,8 @@
       paintState.bgColor,
       root.dataset.theme || "",
       underlyingCacheDirty ? "dirty" : "clean",
+      overlayCacheDirty ? "odirty" : "oclean",
+      mediaIsPlaying() ? "playing" : "idle",
     ].join("|");
     frameForceBackground = nextFrameSignature !== frameSignature;
     if (frameForceBackground) {
@@ -2447,6 +2969,10 @@
 
   if (initRenderer()) {
     window.addEventListener("resize", render, { passive: true });
+    // 窗口尺寸变化会改变排版,快照需要重建
+    window.addEventListener("resize", () => requestSnapshotBackdrop(350), {
+      passive: true,
+    });
     mobileGlassQuery.addEventListener?.("change", () => {
       frameSignature = "";
       render();
@@ -2479,16 +3005,38 @@
     // 字体延迟加载会改变文字排版,同样需要重绘,否则玻璃里保留备用字体的排版。
     if (document.fonts && document.fonts.ready) {
       document.fonts.ready.then(
-        () => invalidateGlassFrame(),
+        () => {
+          invalidateGlassFrame();
+          requestSnapshotBackdrop(0);
+        },
         () => {},
       );
     }
 
-    // DOM 结构变化(增删节点)时刷新缓存
+    // 选区变化(拖选、点击取消、Ctrl+A)时重绘,否则玻璃里看不到选中底色。
+    // 只在「有选区」或「刚刚还有选区」时才重绘,避免光标移动触发无谓重绘。
+    let hadSelection = false;
+    document.addEventListener("selectionchange", () => {
+      const selection = window.getSelection?.();
+      const hasSelection = Boolean(
+        selection && !selection.isCollapsed && selection.rangeCount,
+      );
+      if (!hasSelection && !hadSelection) return;
+      hadSelection = hasSelection;
+      invalidateGlassFrame();
+    });
+
+    // DOM 结构变化(增删节点)时刷新缓存,并重建快照
     new MutationObserver(() => {
       underlyingCacheDirty = true;
+      overlayCacheDirty = true;
       frameSignature = "";
+      requestSnapshotBackdrop();
     }).observe(document.body, { childList: true, subtree: true });
+
+    // 快照背景首次构建(失败会自动回退到镜像重绘)
+    if (SNAPSHOT.requested) requestSnapshotBackdrop(0);
+
     requestAnimationFrame(loop);
   }
 })();
