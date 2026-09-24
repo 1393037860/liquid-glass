@@ -38,6 +38,8 @@
     uniform float refractionBlur;
     // 色散强度(设备像素):越大,R/B 通道被拉得越开,文字细笔画越容易被冲淡
     uniform float dispersion;
+    // 内部边缘光晕强度倍率(0=最接近原色,1=原版)。data-glass-glow,默认 0.5
+    uniform float glowScale;
     uniform float cornerRadius;
     uniform vec2 shapeSize;
     uniform float alphaBoost;
@@ -299,7 +301,11 @@
           b += (1.0 - b) * high;
         }
         if (num2 > 0.0) {
-          float high = num2 * pow(max(0.0, max(ang2 * 0.4, ang1 * 0.3)), 2.2);
+          // 内部边缘光晕(原版的签名提亮)。它的作用范围是"整个内部"而不是薄薄一圈,
+          // 实测会把图片上的选中蓝 #3264ce 抬到 #789ade(约 24~34% 向白偏移)。
+          // 强度由 data-glass-glow 控制:1 = 原版,0 = 最接近原色。
+          float high =
+            num2 * pow(max(0.0, max(ang2 * 0.4, ang1 * 0.3)), 2.2) * glowScale;
           r += (1.0 - r) * high;
           g += (1.0 - g) * high;
           b += (1.0 - b) * high;
@@ -1644,6 +1650,51 @@
           });
         }
       });
+
+      // 图片 / 视频 / canvas 这类「替换元素」被选中时,Chrome 同样会在它们上面
+      // 刷选中色(Ctrl+A 之后整张图是蓝的)。它们没有文本节点,所以必须单独收一遍;
+      // 注意只收替换元素,不要收普通块级盒子 —— 那正是"整块卡片变蓝"的原因。
+      const replacedSelector = "img, video, canvas, svg, object, embed";
+      const replacedNodes =
+        typeof element.querySelectorAll === "function"
+          ? element.querySelectorAll(replacedSelector)
+          : [];
+      replacedNodes.forEach((node) => {
+        if (node.closest?.("[data-liquid-glass]")) return;
+        if (node.classList?.contains("liquid-glass-canvas")) return;
+        if (node.classList?.contains("pdaim-line-field")) return;
+        if (!range.intersectsNode(node)) return;
+        // ★ 实测:Chrome 给 <img> 刷选中色只覆盖**内容盒**,不含 padding。
+        //   像 iPhone 那张图有 padding:40px,用 border box 会把两边的白边
+        //   也刷成淡蓝("两边很多白色、颜色还原不对"就是这么来的)。
+        const box = node.getBoundingClientRect();
+        const nodeStyle = getComputedStyle(node);
+        const padLeft = parseCssLength(nodeStyle.paddingLeft, 0);
+        const padRight = parseCssLength(nodeStyle.paddingRight, 0);
+        const padTop = parseCssLength(nodeStyle.paddingTop, 0);
+        const padBottom = parseCssLength(nodeStyle.paddingBottom, 0);
+        const rect = {
+          left: box.left + padLeft,
+          top: box.top + padTop,
+          right: box.right - padRight,
+          bottom: box.bottom - padBottom,
+          width: Math.max(0, box.width - padLeft - padRight),
+          height: Math.max(0, box.height - padTop - padBottom),
+        };
+        if (rect.width <= 0.5 || rect.height <= 0.5) return;
+        // ★ 图片上的选中色是**半透明**的:实测(反解 Chrome 截图)alpha ≈ 0.66,
+        //   所以透过它能隐约看见图片内容。文字上的选中色才是不透明的。
+        items.push({
+          rect,
+          background: colorMixAlpha(
+            resolveSelectionBackground(
+              node,
+              getComputedStyle(node, "::selection"),
+            ),
+            REPLACED_SELECTION_ALPHA,
+          ),
+        });
+      });
     }
 
     return items;
@@ -1693,7 +1744,10 @@
     return items;
   }
 
-  const SELECTION_TEXT_LIMIT = 400; // 逐字重绘的成本保护
+  const SELECTION_CHAR_BUDGET = 1500; // 每帧逐字重绘的字符预算(成本保护)
+  // 替换元素(img/video/canvas)上的选中色透明度:实测 Chrome ≈ 0.66(半透明,
+  // 图片能透过选中色隐约可见);文字上的选中色是不透明的。
+  const REPLACED_SELECTION_ALPHA = 0.66;
 
   // 把选中文字按高亮前景色重绘在最上层。
   // 底色是不透明的,已经把快照/镜像里原来的文字盖掉了,所以这里直接重画即可。
@@ -1711,12 +1765,19 @@
       if (!element || element.closest?.("[data-liquid-glass]")) continue;
 
       const selectedText = range.toString();
-      if (!selectedText || selectedText.length > SELECTION_TEXT_LIMIT) continue;
+      if (!selectedText) continue;
 
       const nodes = collectSelectedTextNodes(range, element);
       if (!nodes.length) continue;
 
+      // 逐字测量很贵,所以先做"节点级粗筛",把玻璃外的整段直接跳过 ——
+      // 开销只取决于"玻璃内有多少字",而不是"选区有多大"。
+      // (之前按整个选区 400 字符一刀切,Ctrl+A 整页选中时白字整段不画,
+      //  玻璃里就成了一片纯蓝。)
+      let charBudget = SELECTION_CHAR_BUDGET;
+
       nodes.forEach((item) => {
+        if (charBudget <= 0) return;
         // ★ 每个文本节点用它**自己**父元素的样式。
         //   range.commonAncestorContainer 在跨元素选区时往往是外层容器
         //   (例如 .cards,字号 16px / 常规体),拿它重绘会把标题(18px / 700)
@@ -1727,6 +1788,20 @@
         const color = resolveSelectionTextColor(selectionStyle, style.color);
         // 前景色与正文一样(或取不到)就不用重绘这一段
         if (color === style.color || isTransparentColor(color)) return;
+
+        // 粗筛:这个节点被选中的部分有没有落在玻璃里
+        const nodeRange = document.createRange();
+        nodeRange.setStart(item.node, item.start);
+        nodeRange.setEnd(item.node, item.end);
+        const nodeRects = nodeRange.getClientRects();
+        let overlaps = false;
+        for (let r = 0; r < nodeRects.length; r += 1) {
+          if (intersects(nodeRects[r], canvasRect)) {
+            overlaps = true;
+            break;
+          }
+        }
+        if (!overlaps) return;
 
         // 注意:即使是 background-clip:text 的渐变文字,Chrome 选中它时文字
         // **仍然会变成 ::selection 的前景色(通常是白字)** —— 实测确认,
@@ -1742,21 +1817,38 @@
         applyCanvasTextSpacing(ctx, style, dpr);
         ctx.globalAlpha = getCompositedOpacity(styleElement);
 
-        for (let i = item.start; i < item.end; i += 1) {
-          const char = value[i];
-          if (!char || /\s/.test(char)) continue;
+        // ★ 必须按「码点」迭代,不能按 UTF-16 码元。
+        //   辅助平面字符(emoji,如 🌈 U+1F308 / 💡 U+1F4A1)占两个码元,
+        //   用 value[i] 会把它拆成半个字符 → canvas 画出替换字形(问号)。
+        //   ⚡ U+26A1、⏱ U+23F1 在 BMP 内只占一个码元,所以之前只有这两个正常。
+        for (let i = item.start; i < item.end; ) {
+          const codePoint = value.codePointAt(i);
+          if (codePoint === undefined) break;
+          const step = codePoint > 0xffff ? 2 : 1;
+          const char = value.slice(i, i + step);
+          if (/\s/.test(char)) {
+            i += step;
+            continue;
+          }
+          if (charBudget <= 0) break;
+          charBudget -= 1;
           const charRange = document.createRange();
           charRange.setStart(item.node, i);
-          charRange.setEnd(item.node, i + 1);
+          charRange.setEnd(item.node, i + step);
           const rect = charRange.getBoundingClientRect();
           charRange.detach?.();
-          if (!rect.width || !rect.height) continue;
-          if (!intersects(rect, canvasRect)) continue;
-          ctx.fillText(
-            char,
-            (rect.left - canvasRect.left) * dpr,
-            ((rect.top + rect.bottom) * 0.5 - canvasRect.top) * dpr,
-          );
+          if (!rect.width || !rect.height) {
+            i += step;
+            continue;
+          }
+          if (intersects(rect, canvasRect)) {
+            ctx.fillText(
+              char,
+              (rect.left - canvasRect.left) * dpr,
+              ((rect.top + rect.bottom) * 0.5 - canvasRect.top) * dpr,
+            );
+          }
+          i += step;
         }
 
         ctx.restore();
@@ -2346,12 +2438,16 @@
     const blur = parseCssLength(host.dataset.glassBlur || "", NaN);
     const dispersion = parseFloat(host.dataset.glassDispersion || "");
     const lens = parseFloat(host.dataset.glassLens || "");
+    const glow = parseFloat(host.dataset.glassGlow || "");
 
     return {
       cornerRadius: radius,
       glassBlur: Number.isFinite(blur) ? blur : 20,
       // 折射带宽 = glassBlur × lens:调大 → 边缘折射范围更宽,调小 → 更窄更贴身
       lens: Number.isFinite(lens) ? Math.min(Math.max(lens, 0.2), 3) : 1.25,
+      // 内部边缘光晕倍率:1 = 原版观感;调小 → 颜色更接近原色(但玻璃感变弱)。
+      // 注意:实测它对"整体偏白"影响很小(0.5→0 平均色差 30.7→31),主要看观感。
+      glow: Number.isFinite(glow) ? Math.min(Math.max(glow, 0), 1.5) : 1,
       // 色散强度,默认 6.25(原值);调小 → 文字更实、彩边更少
       dispersion: Number.isFinite(dispersion) ? dispersion : 6.25,
       alphaBoost: parseFloat(host.dataset.glassAlpha) || 1,
@@ -2526,6 +2622,7 @@
         glassBlur: gl.getUniformLocation(program, "glassBlur"),
         refractionBlur: gl.getUniformLocation(program, "refractionBlur"),
         dispersion: gl.getUniformLocation(program, "dispersion"),
+        glowScale: gl.getUniformLocation(program, "glowScale"),
         cornerRadius: gl.getUniformLocation(program, "cornerRadius"),
         shapeSize: gl.getUniformLocation(program, "shapeSize"),
         alphaBoost: gl.getUniformLocation(program, "alphaBoost"),
@@ -2992,6 +3089,7 @@
     gl.uniform1f(locations.glassBlur, glassBlur);
     gl.uniform1f(locations.refractionBlur, refractionBlur);
     gl.uniform1f(locations.dispersion, dispersion);
+    gl.uniform1f(locations.glowScale, options.glow);
     gl.uniform1f(locations.cornerRadius, cornerRadius);
     gl.uniform2f(locations.shapeSize, shapeWidth, shapeHeight);
     gl.uniform1f(locations.alphaBoost, options.alphaBoost);
@@ -3172,7 +3270,100 @@
     render();
   }
 
+  // ===== 调试辅助:控制台一行命令调参(只在调试时用,不影响正常渲染)=====
+  // 用法(浏览器 F12 → Console):
+  //   glassTune()                        // 打印当前所有玻璃参数
+  //   glassTune({ blur: 12, lens: 0.9 })  // 立即生效(不用改文件)
+  //   glassTune("reset")                  // 全部恢复成 index.html 里写的值
+  function installGlassTune() {
+    const KEY_MAP = {
+      blur: "glassBlur",
+      lens: "glassLens",
+      glow: "glassGlow",
+      dispersion: "glassDispersion",
+      alpha: "glassAlpha",
+    };
+    const hosts = () =>
+      Array.from(document.querySelectorAll("[data-liquid-glass]"));
+
+    const read = (host) => ({
+      blur: host.dataset.glassBlur ?? "(默认 20) 折射/模糊半径",
+      lens: host.dataset.glassLens ?? "(默认 1.25) 折射带宽度倍率",
+      glow: host.dataset.glassGlow ?? "(默认 0.5) 内部边缘光晕",
+      dispersion: host.dataset.glassDispersion ?? "(默认 6.25) 色散强度",
+      alpha: host.dataset.glassAlpha ?? "(默认 1) 玻璃不透明度倍数",
+    });
+
+    // 记录页面里(HTML 属性)的初始值:reset 要回到"文件里的值",
+    // 而不是代码默认值 —— 否则把参数固化进 index.html 之后 reset 就失效了。
+    const initialValues = new WeakMap();
+    const rememberInitial = (host) => {
+      if (initialValues.has(host)) return;
+      const snapshot = {};
+      Object.values(KEY_MAP).forEach((key) => {
+        if (host.dataset[key] !== undefined) snapshot[key] = host.dataset[key];
+      });
+      initialValues.set(host, snapshot);
+    };
+    const initialDprLimit = root.dataset.glassDprLimit;
+    let dprLimitRemembered = initialDprLimit !== undefined;
+
+    window.glassTune = (options) => {
+      const list = hosts();
+      if (!list.length) return "没有找到 [data-liquid-glass] 宿主";
+
+      if (!options) {
+        const out = { "DPR 上限(<html>)": root.dataset.glassDprLimit ?? "(默认 1.25)" };
+        list.forEach((host, index) => {
+          out["宿主" + (list.length > 1 ? index : "") + " " + (host.className || host.tagName)] = read(host);
+        });
+        if (window.console && console.table) console.table(out);
+        return out;
+      }
+
+      if (options === "reset") {
+        list.forEach((host) => {
+          rememberInitial(host);
+          const snapshot = initialValues.get(host) || {};
+          Object.values(KEY_MAP).forEach((key) => delete host.dataset[key]);
+          Object.keys(snapshot).forEach((key) => {
+            host.dataset[key] = snapshot[key];
+          });
+        });
+        if (dprLimitRemembered) root.dataset.glassDprLimit = initialDprLimit;
+        else delete root.dataset.glassDprLimit;
+      } else {
+        list.forEach((host) => {
+          rememberInitial(host);
+          Object.keys(KEY_MAP).forEach((key) => {
+            if (!(key in options)) return;
+            const value = options[key];
+            if (value === null || value === undefined) delete host.dataset[KEY_MAP[key]];
+            else host.dataset[KEY_MAP[key]] = String(value);
+          });
+          if ("dprLimit" in options) {
+            if (options.dprLimit === null || options.dprLimit === undefined)
+              delete root.dataset.glassDprLimit;
+            else root.dataset.glassDprLimit = String(options.dprLimit);
+          }
+        });
+      }
+      document.dispatchEvent(new Event("pdaim:liquid-refresh"));
+      window.glassTune();
+      return options === "reset"
+        ? "已恢复 index.html 里的默认值"
+        : "已应用 " + JSON.stringify(options) + "(刷新页面即可还原)";
+    };
+
+    if (window.console && console.info) {
+      console.info(
+        "[liquid-glass] 调参:glassTune() 查看当前值 / glassTune({blur:12,lens:0.9}) 立即生效 / glassTune('reset') 还原",
+      );
+    }
+  }
+
   if (initRenderer()) {
+    installGlassTune();
     window.addEventListener("resize", render, { passive: true });
     // 窗口尺寸变化会改变排版,快照需要重建
     window.addEventListener("resize", () => requestSnapshotBackdrop(350), {
