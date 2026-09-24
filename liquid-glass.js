@@ -40,6 +40,9 @@
     uniform float dispersion;
     // 内部边缘光晕强度倍率(0=最接近原色,1=原版)。data-glass-glow,默认 0.5
     uniform float glowScale;
+    // 折射位移幅度倍率(相对 glassBlur)。data-glass-refract,默认 0.6
+    // 越小 → 画面尺寸越接近原样(边缘"压扁"越少),折射感也越弱
+    uniform float refractScale;
     uniform float cornerRadius;
     uniform vec2 shapeSize;
     uniform float alphaBoost;
@@ -190,9 +193,12 @@
       float distance = clamp(glassRadius + signedDistance, 0.0, glassRadius + 6.25);
       // 折射带比高光带略宽(原版的折射剖面是"厚镜片"型:circleMap 在带中间
       // 最强、内侧回到 0)。宽度由 data-glass-lens 控制,默认 1.25。
-      // 位移量单独限幅:原来 |d| 最大能到 glassRadius(≈38 设备像素),边缘被"撕"得很猛
+      // 位移的**幅度**单独可控(data-glass-refract,默认 0.6):
+      //   每个像素都从边缘往内侧取样(顶边向下、底边向上)→ 上下内容被压向中间,
+      //   看起来"变小/被压扁"。幅度 = max(glassBlur × refract, 4) 设备像素,
+      //   调小即可让画面尺寸更接近原样,而不必削弱折射带宽度。
       vec2 refraction =
-        normal * min(distance, max(glassBlur * 0.6, 4.0));
+        normal * min(distance, max(glassBlur * refractScale, 4.0));
       // 色散只在四角最强、在水平/垂直中线上归零(借鉴原版 (cx*cy)/(hx*hy)),
       // 这样上下边缘不会再出现横贯整条的彩虹纹。
       float chromaWeight =
@@ -2439,6 +2445,7 @@
     const dispersion = parseFloat(host.dataset.glassDispersion || "");
     const lens = parseFloat(host.dataset.glassLens || "");
     const glow = parseFloat(host.dataset.glassGlow || "");
+    const refract = parseFloat(host.dataset.glassRefract || "");
 
     return {
       cornerRadius: radius,
@@ -2448,6 +2455,8 @@
       // 内部边缘光晕倍率:1 = 原版观感;调小 → 颜色更接近原色(但玻璃感变弱)。
       // 注意:实测它对"整体偏白"影响很小(0.5→0 平均色差 30.7→31),主要看观感。
       glow: Number.isFinite(glow) ? Math.min(Math.max(glow, 0), 1.5) : 1,
+      // 折射位移幅度:调小 → 边缘"压扁/变小"更少(画面尺寸更接近原样)
+      refract: Number.isFinite(refract) ? Math.min(Math.max(refract, 0), 2) : 0.6,
       // 色散强度,默认 6.25(原值);调小 → 文字更实、彩边更少
       dispersion: Number.isFinite(dispersion) ? dispersion : 6.25,
       alphaBoost: parseFloat(host.dataset.glassAlpha) || 1,
@@ -2623,6 +2632,7 @@
         refractionBlur: gl.getUniformLocation(program, "refractionBlur"),
         dispersion: gl.getUniformLocation(program, "dispersion"),
         glowScale: gl.getUniformLocation(program, "glowScale"),
+        refractScale: gl.getUniformLocation(program, "refractScale"),
         cornerRadius: gl.getUniformLocation(program, "cornerRadius"),
         shapeSize: gl.getUniformLocation(program, "shapeSize"),
         alphaBoost: gl.getUniformLocation(program, "alphaBoost"),
@@ -3090,6 +3100,7 @@
     gl.uniform1f(locations.refractionBlur, refractionBlur);
     gl.uniform1f(locations.dispersion, dispersion);
     gl.uniform1f(locations.glowScale, options.glow);
+    gl.uniform1f(locations.refractScale, options.refract);
     gl.uniform1f(locations.cornerRadius, cornerRadius);
     gl.uniform2f(locations.shapeSize, shapeWidth, shapeHeight);
     gl.uniform1f(locations.alphaBoost, options.alphaBoost);
@@ -3279,6 +3290,7 @@
     const KEY_MAP = {
       blur: "glassBlur",
       lens: "glassLens",
+      refract: "glassRefract",
       glow: "glassGlow",
       dispersion: "glassDispersion",
       alpha: "glassAlpha",
@@ -3289,7 +3301,8 @@
     const read = (host) => ({
       blur: host.dataset.glassBlur ?? "(默认 20) 折射/模糊半径",
       lens: host.dataset.glassLens ?? "(默认 1.25) 折射带宽度倍率",
-      glow: host.dataset.glassGlow ?? "(默认 0.5) 内部边缘光晕",
+      refract: host.dataset.glassRefract ?? "(默认 0.6) 折射位移幅度(越小越不压扁)",
+      glow: host.dataset.glassGlow ?? "(默认 1) 内部边缘光晕",
       dispersion: host.dataset.glassDispersion ?? "(默认 6.25) 色散强度",
       alpha: host.dataset.glassAlpha ?? "(默认 1) 玻璃不透明度倍数",
     });
