@@ -1015,7 +1015,14 @@
     ctx.restore();
   }
 
-  function drawImageElement(ctx, image, canvasRect, dpr, skipUnsafeImages) {
+  function drawImageElement(
+    ctx,
+    image,
+    canvasRect,
+    dpr,
+    skipUnsafeImages,
+    alphaMultiplier,
+  ) {
     if (skipUnsafeImages === undefined) skipUnsafeImages = false;
     var rect = image.getBoundingClientRect();
     if (!rect.width || !rect.height || !intersects(rect, canvasRect)) return;
@@ -1032,7 +1039,8 @@
     }
 
     ctx.save();
-    ctx.globalAlpha = getCompositedOpacity(image);
+    ctx.globalAlpha =
+      getCompositedOpacity(image) * (alphaMultiplier ?? 1);
 
     // 图片容器通常用 overflow:hidden + border-radius 裁圆角，
     // 图片自身没有圆角，需要按父容器裁剪，否则折射里会出现直角。
@@ -1612,6 +1620,7 @@
   }
 
   function collectSelectionRects() {
+    pendingReplacedContent = [];
     const selection = window.getSelection?.();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return [];
 
@@ -1688,16 +1697,15 @@
           height: Math.max(0, box.height - padTop - padBottom),
         };
         if (rect.width <= 0.5 || rect.height <= 0.5) return;
-        // ★ 图片上的选中色是**半透明**的:实测(反解 Chrome 截图)alpha ≈ 0.66,
-        //   所以透过它能隐约看见图片内容。文字上的选中色才是不透明的。
+        // ★ 底色是**不透明**的(实测:内容盒留白处 Ctrl+A 后是 #3264ce ≈ 选中色本身),
+        //   而"照片还能看见"是因为 Chrome 把图片内容重新叠在了选中色之上 ——
+        //   所以这里先记下节点,稍后用 REPLACED_CONTENT_ALPHA 把内容补画回去。
+        pendingReplacedContent.push(node);
         items.push({
           rect,
-          background: colorMixAlpha(
-            resolveSelectionBackground(
-              node,
-              getComputedStyle(node, "::selection"),
-            ),
-            REPLACED_SELECTION_ALPHA,
+          background: resolveSelectionBackground(
+            node,
+            getComputedStyle(node, "::selection"),
           ),
         });
       });
@@ -1721,6 +1729,43 @@
         item.rect.width * dpr,
         item.rect.height * dpr,
       );
+      ctx.restore();
+    });
+  }
+
+  // 选中底色是不透明的,替换元素(img/video/canvas)的内容要按
+  // REPLACED_CONTENT_ALPHA 重新叠回去 —— Chrome 就是这样:留白处是纯选中色,
+  // 而图片本身仍能隐约看见。
+  function drawSelectionContentLayer(ctx, canvasRect, dpr, state) {
+    if (!pendingReplacedContent.length) return;
+
+    pendingReplacedContent.forEach((node) => {
+      if (!node || !node.isConnected) return;
+      if (node instanceof HTMLImageElement) {
+        drawImageElement(
+          ctx,
+          node,
+          canvasRect,
+          dpr,
+          state.skipUnsafeImages,
+          REPLACED_CONTENT_ALPHA,
+        );
+        return;
+      }
+      // 视频 / 普通 canvas:直接按矩形半透明重画一次
+      const rect = node.getBoundingClientRect();
+      if (!rect.width || !rect.height || !intersects(rect, canvasRect)) return;
+      ctx.save();
+      ctx.globalAlpha = REPLACED_CONTENT_ALPHA;
+      try {
+        ctx.drawImage(
+          node,
+          (rect.left - canvasRect.left) * dpr,
+          (rect.top - canvasRect.top) * dpr,
+          rect.width * dpr,
+          rect.height * dpr,
+        );
+      } catch (error) {}
       ctx.restore();
     });
   }
@@ -1751,9 +1796,11 @@
   }
 
   const SELECTION_CHAR_BUDGET = 1500; // 每帧逐字重绘的字符预算(成本保护)
-  // 替换元素(img/video/canvas)上的选中色透明度:实测 Chrome ≈ 0.66(半透明,
-  // 图片能透过选中色隐约可见);文字上的选中色是不透明的。
-  const REPLACED_SELECTION_ALPHA = 0.66;
+  // 替换元素被选中时:底色不透明(实测),图片内容再以这个透明度叠回去,
+  // 于是"留白处是纯选中色、照片仍能隐约看见" —— 与 Chrome 的观感一致。
+  const REPLACED_CONTENT_ALPHA = 0.34;
+  // collectSelectionRects 顺带收集"需要补画内容"的替换元素
+  let pendingReplacedContent = [];
 
   // 把选中文字按高亮前景色重绘在最上层。
   // 底色是不透明的,已经把快照/镜像里原来的文字盖掉了,所以这里直接重画即可。
@@ -2261,6 +2308,9 @@
 
     // 选区底色要压在文字下面,所以放在文字两趟之前
     drawSelectionLayer(ctx, canvasRect, dpr);
+    // 选中底色是不透明的,替换元素(图片/视频/canvas)的内容要按
+    // REPLACED_CONTENT_ALPHA 补画回去,否则"图片被完全糊住"。
+    drawSelectionContentLayer(ctx, canvasRect, dpr, state);
 
     elements.forEach((element) => {
       if (shouldSkipUnderlyingElement(element, host)) return;
