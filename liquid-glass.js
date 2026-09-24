@@ -1969,10 +1969,7 @@
     if (!SNAPSHOT.enabled || SNAPSHOT.building) return;
     if (SNAPSHOT.ready && SNAPSHOT.builtVersion === SNAPSHOT.version) return;
 
-    const dpr = Math.min(
-      window.devicePixelRatio || 1,
-      isLiteGlassMode() ? MOBILE_GLASS_DPR_LIMIT : GLASS_DPR_LIMIT,
-    );
+    const dpr = Math.min(window.devicePixelRatio || 1, getGlassDprLimit());
     // 布局尺寸:视口宽度用 clientWidth(不含滚动条),这样快照里的排版范围
     // 与真实页面的排版视口完全一致,居中的内容不会偏移。
     const layoutWidth = Math.max(
@@ -2309,6 +2306,17 @@
   const MOBILE_MAX_GLASS_OUTPUTS = 1;
   const GLASS_DPR_LIMIT = 1.25;
   const MOBILE_GLASS_DPR_LIMIT = 0.85;
+
+  // 玻璃纹理的 DPR 上限。默认 1.25 是原版的性能取舍:如果显示器缩放是 150%/200%,
+  // 纹理只有屏幕的 83%/62.5%,再被放大就会"发虚"。用 <html data-glass-dpr-limit="2">
+  // 可以拉到跟屏幕一致(更清晰,代价是像素量按平方增长)。
+  function getGlassDprLimit() {
+    if (isLiteGlassMode()) return MOBILE_GLASS_DPR_LIMIT;
+    const configured = parseFloat(root.dataset.glassDprLimit || "");
+    if (Number.isFinite(configured) && configured > 0)
+      return Math.min(configured, 3);
+    return GLASS_DPR_LIMIT;
+  }
   const outputContexts = new WeakMap();
   const sharedBackground = createBackgroundCanvas();
   const localBackground = createBackgroundCanvas();
@@ -2944,10 +2952,7 @@
     if (!gl || contextLost || gl.isContextLost()) return;
     lastRenderStamp = performance.now();
 
-    const dpr = Math.min(
-      window.devicePixelRatio || 1,
-      isLiteGlassMode() ? MOBILE_GLASS_DPR_LIMIT : GLASS_DPR_LIMIT,
-    );
+    const dpr = Math.min(window.devicePixelRatio || 1, getGlassDprLimit());
     const metrics = {
       dpr,
       viewportWidth: Math.max(1, Math.round(window.innerWidth * dpr)),

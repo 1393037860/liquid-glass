@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light" data-glass-backdrop="snapshot">
+<html lang="zh-CN" data-theme="light" data-glass-backdrop="snapshot" data-glass-dpr-limit="2">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -36,6 +36,14 @@
     color: var(--fg);
     min-height: 200vh;
     -webkit-font-smoothing: antialiased;
+  }
+
+  /* 显式声明选中配色:浏览器默认画出来的选中色读不到(getComputedStyle 拿到的是
+     transparent),只有作者写死的 ::selection 才能被玻璃精确还原 —— 页面与玻璃
+     用同一个颜色,换浏览器 / 主题也不会再对不上。 */
+  ::selection {
+    background: #3165cf;
+    color: #ffffff;
   }
 
   /* ===== 液态玻璃 Header ===== */
