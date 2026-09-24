@@ -97,7 +97,8 @@ liquid-glass/
 | --- | --- | --- |
 | `data-liquid-glass` | 宿主元素 | 标记该元素使用液态玻璃,`liquid-glass.js` 会自动查找其中的 `.liquid-glass-canvas`。 |
 | `data-glass-blur` | 宿主元素 | 玻璃折射模糊半径(px),默认 `20`。调小 → 折射范围更紧、文字更清晰。 |
-| `data-glass-dispersion` | 宿主元素 | 色散强度,默认 `6.25`(原版值)。它把 R/B 通道在折射方向上拉开,是文字边缘出现彩色描边的来源;想更"实"就调小,`0` 即关闭色散。 |
+| `data-glass-dispersion` | 宿主元素 | 色散强度,默认 `6.25`(原版值)。它把 R/B 通道在折射方向上拉开,是文字边缘出现彩色描边的来源;想更"实"就调小,`0` 即关闭色散。**色散按 `|(cx·cy)/(hx·hy)|` 加权**(借鉴 [martin65536/liquid-glass-webgl](https://github.com/martin65536/liquid-glass-webgl),Apache-2.0):在水平/垂直中线上为零、只在四角最强,所以上下边缘不会出现横贯整条的彩虹纹。 |
+| `data-glass-lens` | 宿主元素 | **折射带宽度** = `data-glass-blur × data-glass-lens`,默认 `1.25`(取值 0.2–3)。调小 → 边缘折射范围更窄更贴身,调大 → 更宽。 |
 | `--glass-selection-bg` / `--glass-selection-fg` | `:root` | 覆盖玻璃里还原出来的**选中底色 / 选中文字色**。默认自动取页面 `::selection`,没有则取系统 `Highlight` / `HighlightText`。**推荐直接在页面里写 `::selection`,**因为浏览器默认画出来的选中色没有任何 API 能读到(`getComputedStyle(el,'::selection')` 返回 `transparent`),系统色也未必等于实际画出来的颜色。 |
 | `data-glass-dpr-limit` | `<html>` | 玻璃纹理的 DPR 上限,默认 `1.25`(原版性能取舍)。显示器缩放 150%/200% 时纹理只有屏幕的 83%/62.5%,再放大会"发虚";设成 `2` 即按屏幕分辨率渲染,更清晰,代价是像素量按平方增长。 |
 | `data-glass-alpha` | 宿主元素 | 玻璃整体不透明度倍数,默认 `1`。 |
@@ -142,6 +143,9 @@ liquid-glass/
 
 ## 更新日志
 
+- **折射观感自然化**——① 色散改为按 `|(cx·cy)/(hx·hy)|` 加权(上下边缘不再有整条彩虹,实测全画面"强彩边像素" 640 → 0);② 折射带宽度独立成 uniform + `data-glass-lens`(默认 1.25);③ 位移量限幅 `min(distance, max(glassBlur*0.6, 4))`,边缘不再被"撕";④ 采样偏移改用限幅后的 `refraction` 向量,高光/边缘明暗数学未动。
+- **采样偏移取整**——`textureOffset`/`viewportOffset` 由 `rect.left * dpr` 改为 `Math.round(...)`。小数偏移会让 LINEAR 采样落在纹素之间,拖动时画面发虚、边缘发毛;取整后为 1:1 采样(实测卡片边缘过渡为 1 个设备像素)。代价:采样位置按设备像素量化。
+- **选中态按文本节点还原**——① 字号/字重/前景色/行高/底色全部改成**逐文本节点取自己父元素的样式**(跨元素选区的 `commonAncestorContainer` 往往是外层容器,拿它会标题画成 16px/常规体);② 底色矩形只用**逐文本节点的子 Range**,不再用 `range.getClientRects()` —— 后者在选区完整包含块级元素时会返回**元素整个盒子**,导致整块变蓝、图标被盖没;③ 底色高度按行盒补齐(实测真实 21.05px / 玻璃 21px);④ 即使 `background-clip: text` 的渐变文字,选中时浏览器**仍会**用 `::selection` 前景色(实测),所以一律用高亮前景色填充。
 - **选中色改为由页面显式声明**——`index.html` 里加了 `::selection { background:#3165cf; color:#fff }`。原因:浏览器默认画出来的选中色**没有任何 API 能读到**(`getComputedStyle` 拿到 `transparent`),系统 `Highlight` 值也未必等于实际画出来的颜色(实测 Chrome 画 `#3165cf`,而 `Highlight` 报 `#0078d7`)。写成作者规则后,玻璃取到的就是同一个颜色,实测还原结果 `#3165cf` 完全一致,而且以后自定义也会同步。
 - **新增 `data-glass-dpr-limit`**——原来 DPR 上限硬编码 `1.25`,屏幕缩放 150%/200% 时玻璃纹理只有屏幕的 83%/62.5%,放大后文字发虚。现在可配,`2` 即按屏幕分辨率渲染(实测纹理 `1000×98` → `1600×156`)。
 - **选中态补齐高亮前景色**——真实选中会把选中文字换成 `HighlightText`(通常白字),之前只画了底色,玻璃里会是"蓝底深字"。现在逐字重绘选中文字(`Range` 逐字定位 + `drawSelectionTextLayer`),并把底色 / 前景色都做成可用 `--glass-selection-bg` / `--glass-selection-fg` 覆盖。注意 Chrome 对 `::selection` 的 `color` 默认返回的是**正文色**,所以只有当作者确实覆盖过(与正文色不同)时才采用它。

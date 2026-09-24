@@ -34,6 +34,8 @@
     uniform vec2 textureOffset;
     uniform vec2 lightPos;
     uniform float glassBlur;
+    // 折射带宽度(设备像素)= glassBlur × data-glass-lens,比高光带略宽即可
+    uniform float refractionBlur;
     // 色散强度(设备像素):越大,R/B 通道被拉得越开,文字细笔画越容易被冲淡
     uniform float dispersion;
     uniform float cornerRadius;
@@ -147,7 +149,6 @@
       float normalized = pow(clamp(max(0.0, dst - glassRadius + blurRadius) / blurRadius, 0.0, 1.0), A);
       return 1.0 - pow(1.0 - pow(1.0 - normalized, B), C);
     }
-
     vec2 toTex(vec2 pixelCoord) {
       vec2 uv = vec2(
         (pixelCoord.x + textureOffset.x) / backgroundResolution.x,
@@ -185,6 +186,16 @@
       vec2 normal = sdfNormal(p, halfSize, radius);
       float glassRadius = radius;
       float distance = clamp(glassRadius + signedDistance, 0.0, glassRadius + 6.25);
+      // 折射带比高光带略宽(原版的折射剖面是"厚镜片"型:circleMap 在带中间
+      // 最强、内侧回到 0)。宽度由 data-glass-lens 控制,默认 1.25。
+      // 位移量单独限幅:原来 |d| 最大能到 glassRadius(≈38 设备像素),边缘被"撕"得很猛
+      vec2 refraction =
+        normal * min(distance, max(glassBlur * 0.6, 4.0));
+      // 色散只在四角最强、在水平/垂直中线上归零(借鉴原版 (cx*cy)/(hx*hy)),
+      // 这样上下边缘不会再出现横贯整条的彩虹纹。
+      float chromaWeight =
+        abs((p.x * p.y) / max(1.0, halfSize.x * halfSize.y));
+      float chromaDispersion = dispersion * chromaWeight;
       vec2 d = normal * distance;
 
       vec3 back = applyLineField(applyOrbs(texture2D(backgroundTexture, toTex(pixelCoord)).rgb, pixelCoord), pixelCoord);
@@ -197,15 +208,15 @@
       float b = 0.0;
 
       if (signedDistance <= 0.0) {
-        rel = liquidRel(distance, glassRadius, glassBlur);
+        rel = liquidRel(distance, glassRadius, refractionBlur);
         float ref = rel;
         int upsc = int(clamp(floor(12.0 * abs(1.0 - ref) + ditherValue), 1.0, 8.0));
 
         if (upsc < 2) {
-          float dsp = min(1.0, dispersion / glassRadius * (1.0 - ref));
-          vec2 r_coord = pixelCoord - d * (1.0 - ref + dsp);
-          vec2 g_coord = pixelCoord - d * (1.0 - ref);
-          vec2 b_coord = pixelCoord - d * (1.0 - ref - dsp);
+          float dsp = min(1.0, chromaDispersion / glassRadius * (1.0 - ref));
+          vec2 r_coord = pixelCoord - refraction * (1.0 - ref + dsp);
+          vec2 g_coord = pixelCoord - refraction * (1.0 - ref);
+          vec2 b_coord = pixelCoord - refraction * (1.0 - ref - dsp);
           r += applyLineField(texture2D(backgroundTexture, toTex(r_coord)).rgb, r_coord).r;
           g += applyLineField(texture2D(backgroundTexture, toTex(g_coord)).rgb, g_coord).g;
           b += applyLineField(texture2D(backgroundTexture, toTex(b_coord)).rgb, b_coord).b;
@@ -214,26 +225,26 @@
           float dsp;
 
           dst = clamp(glassRadius + sdRoundBox(p + vec2(-0.5, -0.5), halfSize, radius), 0.0, glassRadius + 6.25);
-          float ref_g0 = liquidRel(dst, glassRadius, glassBlur);
-          dsp = min(1.0, dispersion / glassRadius * (1.0 - ref_g0));
+          float ref_g0 = liquidRel(dst, glassRadius, refractionBlur);
+          dsp = min(1.0, chromaDispersion / glassRadius * (1.0 - ref_g0));
           float ref_r0 = ref_g0 - dsp;
           float ref_b0 = ref_g0 + dsp;
 
           dst = clamp(glassRadius + sdRoundBox(p + vec2(0.5, -0.5), halfSize, radius), 0.0, glassRadius + 6.25);
-          float ref_g1 = liquidRel(dst, glassRadius, glassBlur);
-          dsp = min(1.0, dispersion / glassRadius * (1.0 - ref_g1));
+          float ref_g1 = liquidRel(dst, glassRadius, refractionBlur);
+          dsp = min(1.0, chromaDispersion / glassRadius * (1.0 - ref_g1));
           float ref_r1 = ref_g1 - dsp;
           float ref_b1 = ref_g1 + dsp;
 
           dst = clamp(glassRadius + sdRoundBox(p + vec2(-0.5, 0.5), halfSize, radius), 0.0, glassRadius + 6.25);
-          float ref_g2 = liquidRel(dst, glassRadius, glassBlur);
-          dsp = min(1.0, dispersion / glassRadius * (1.0 - ref_g2));
+          float ref_g2 = liquidRel(dst, glassRadius, refractionBlur);
+          dsp = min(1.0, chromaDispersion / glassRadius * (1.0 - ref_g2));
           float ref_r2 = ref_g2 - dsp;
           float ref_b2 = ref_g2 + dsp;
 
           dst = clamp(glassRadius + sdRoundBox(p + vec2(0.5, 0.5), halfSize, radius), 0.0, glassRadius + 6.25);
-          float ref_g3 = liquidRel(dst, glassRadius, glassBlur);
-          dsp = min(1.0, dispersion / glassRadius * (1.0 - ref_g3));
+          float ref_g3 = liquidRel(dst, glassRadius, refractionBlur);
+          dsp = min(1.0, chromaDispersion / glassRadius * (1.0 - ref_g3));
           float ref_r3 = ref_g3 - dsp;
           float ref_b3 = ref_g3 + dsp;
 
@@ -246,9 +257,9 @@
               float rr = ref_r0 + (ref_r1 - ref_r0) * inum + (ref_r2 - ref_r0) * jnum + (ref_r3 - ref_r0) * inum * jnum;
               float gg = ref_g0 + (ref_g1 - ref_g0) * inum + (ref_g2 - ref_g0) * jnum + (ref_g3 - ref_g0) * inum * jnum;
               float bb = ref_b0 + (ref_b1 - ref_b0) * inum + (ref_b2 - ref_b0) * jnum + (ref_b3 - ref_b0) * inum * jnum;
-              vec2 r_coord = pixelCoord - d * (1.0 - rr);
-              vec2 g_coord = pixelCoord - d * (1.0 - gg);
-              vec2 b_coord = pixelCoord - d * (1.0 - bb);
+              vec2 r_coord = pixelCoord - refraction * (1.0 - rr);
+              vec2 g_coord = pixelCoord - refraction * (1.0 - gg);
+              vec2 b_coord = pixelCoord - refraction * (1.0 - bb);
               r += applyLineField(texture2D(backgroundTexture, toTex(r_coord)).rgb, r_coord).r;
               g += applyLineField(texture2D(backgroundTexture, toTex(g_coord)).rgb, g_coord).g;
               b += applyLineField(texture2D(backgroundTexture, toTex(b_coord)).rgb, b_coord).b;
@@ -294,7 +305,7 @@
           b += (1.0 - b) * high;
         }
 
-        color = applyOrbs(vec3(r, g, b), pixelCoord - d * (1.0 - rel));
+        color = applyOrbs(vec3(r, g, b), pixelCoord - refraction * (1.0 - rel));
       }
 
       if (distance > glassRadius - 2.0 && signedDistance <= 0.75) {
@@ -1604,16 +1615,35 @@
       // 玻璃自身内部的选中不参与镜像
       if (!element || element.closest?.("[data-liquid-glass]")) continue;
 
-      const selectionStyle = getComputedStyle(element, "::selection");
-      const background = resolveSelectionBackground(element, selectionStyle);
-      const lineHeight = parseFloat(getComputedStyle(element).lineHeight);
-
-      const rects = range.getClientRects();
-      for (let rectIndex = 0; rectIndex < rects.length; rectIndex += 1) {
-        const rect = rects[rectIndex];
-        if (rect.width <= 0.5 || rect.height <= 0.5) continue;
-        items.push({ rect: expandSelectionRect(rect, lineHeight), background });
-      }
+      // ★ 只用「逐文本节点」的矩形,不要用 range.getClientRects()。
+      //   原因:当选区**完整包含**某个块级元素时(例如跨卡片选区里整块被选中的
+      //   .card-icon),range.getClientRects() 会返回该元素的整个盒子 → 玻璃里
+      //   刷出一大片蓝,而那片区域并没有对应文字可重绘,图标就被"盖没了"。
+      //   逐文本节点的子 Range 只会给出真正被选中的文字行矩形,并且每个节点
+      //   都带自己的 ::selection 底色 / 行高。
+      const nodes = collectSelectedTextNodes(range, element);
+      nodes.forEach((item) => {
+        const styleElement = item.node.parentElement || element;
+        const nodeBackground = resolveSelectionBackground(
+          styleElement,
+          getComputedStyle(styleElement, "::selection"),
+        );
+        const nodeLineHeight = parseFloat(
+          getComputedStyle(styleElement).lineHeight,
+        );
+        const sub = document.createRange();
+        sub.setStart(item.node, item.start);
+        sub.setEnd(item.node, item.end);
+        const subRects = sub.getClientRects();
+        for (let rectIndex = 0; rectIndex < subRects.length; rectIndex += 1) {
+          const rect = subRects[rectIndex];
+          if (rect.width <= 0.5 || rect.height <= 0.5) continue;
+          items.push({
+            rect: expandSelectionRect(rect, nodeLineHeight),
+            background: nodeBackground,
+          });
+        }
+      });
     }
 
     return items;
@@ -1683,25 +1713,35 @@
       const selectedText = range.toString();
       if (!selectedText || selectedText.length > SELECTION_TEXT_LIMIT) continue;
 
-      const style = getComputedStyle(element);
-      const selectionStyle = getComputedStyle(element, "::selection");
-      const color = resolveSelectionTextColor(selectionStyle, style.color);
-      // 前景色与正文一样(或取不到)就不需要重绘
-      if (color === style.color || isTransparentColor(color)) continue;
-
       const nodes = collectSelectedTextNodes(range, element);
       if (!nodes.length) continue;
 
-      ctx.save();
-      ctx.font = canvasFontFromStyle(style, dpr);
-      ctx.fillStyle = color;
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      applyCanvasTextSpacing(ctx, style, dpr);
-      ctx.globalAlpha = getCompositedOpacity(element);
-
       nodes.forEach((item) => {
+        // ★ 每个文本节点用它**自己**父元素的样式。
+        //   range.commonAncestorContainer 在跨元素选区时往往是外层容器
+        //   (例如 .cards,字号 16px / 常规体),拿它重绘会把标题(18px / 700)
+        //   之类的文字画成又小又细 —— 这就是"选中两行后文字变小"的原因。
+        const styleElement = item.node.parentElement || element;
+        const style = getComputedStyle(styleElement);
+        const selectionStyle = getComputedStyle(styleElement, "::selection");
+        const color = resolveSelectionTextColor(selectionStyle, style.color);
+        // 前景色与正文一样(或取不到)就不用重绘这一段
+        if (color === style.color || isTransparentColor(color)) return;
+
+        // 注意:即使是 background-clip:text 的渐变文字,Chrome 选中它时文字
+        // **仍然会变成 ::selection 的前景色(通常是白字)** —— 实测确认,
+        // 所以这里不要用渐变去填充,必须用高亮前景色。
+        const fillStyle = color;
+
         const value = item.node.nodeValue || "";
+        ctx.save();
+        ctx.font = canvasFontFromStyle(style, dpr);
+        ctx.fillStyle = fillStyle;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        applyCanvasTextSpacing(ctx, style, dpr);
+        ctx.globalAlpha = getCompositedOpacity(styleElement);
+
         for (let i = item.start; i < item.end; i += 1) {
           const char = value[i];
           if (!char || /\s/.test(char)) continue;
@@ -1718,9 +1758,9 @@
             ((rect.top + rect.bottom) * 0.5 - canvasRect.top) * dpr,
           );
         }
-      });
 
-      ctx.restore();
+        ctx.restore();
+      });
     }
   }
 
@@ -2305,10 +2345,13 @@
     );
     const blur = parseCssLength(host.dataset.glassBlur || "", NaN);
     const dispersion = parseFloat(host.dataset.glassDispersion || "");
+    const lens = parseFloat(host.dataset.glassLens || "");
 
     return {
       cornerRadius: radius,
       glassBlur: Number.isFinite(blur) ? blur : 20,
+      // 折射带宽 = glassBlur × lens:调大 → 边缘折射范围更宽,调小 → 更窄更贴身
+      lens: Number.isFinite(lens) ? Math.min(Math.max(lens, 0.2), 3) : 1.25,
       // 色散强度,默认 6.25(原值);调小 → 文字更实、彩边更少
       dispersion: Number.isFinite(dispersion) ? dispersion : 6.25,
       alphaBoost: parseFloat(host.dataset.glassAlpha) || 1,
@@ -2481,6 +2524,7 @@
         textureOffset: gl.getUniformLocation(program, "textureOffset"),
         lightPos: gl.getUniformLocation(program, "lightPos"),
         glassBlur: gl.getUniformLocation(program, "glassBlur"),
+        refractionBlur: gl.getUniformLocation(program, "refractionBlur"),
         dispersion: gl.getUniformLocation(program, "dispersion"),
         cornerRadius: gl.getUniformLocation(program, "cornerRadius"),
         shapeSize: gl.getUniformLocation(program, "shapeSize"),
@@ -2902,6 +2946,7 @@
       shapeWidth * 0.5,
     );
     const glassBlur = options.glassBlur * dpr;
+    const refractionBlur = glassBlur * options.lens;
     const dispersion = options.dispersion * dpr;
     const darkAmount = root.dataset.theme === "dark" ? 1 : 0;
 
@@ -2945,6 +2990,7 @@
     }
     gl.uniform2f(locations.lightPos, width * 0.25, height * 0.25);
     gl.uniform1f(locations.glassBlur, glassBlur);
+    gl.uniform1f(locations.refractionBlur, refractionBlur);
     gl.uniform1f(locations.dispersion, dispersion);
     gl.uniform1f(locations.cornerRadius, cornerRadius);
     gl.uniform2f(locations.shapeSize, shapeWidth, shapeHeight);
