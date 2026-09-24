@@ -1601,21 +1601,25 @@
   }
 
   function resolveSelectionBackground(element, selectionStyle) {
-    if (!isTransparentColor(selectionStyle.backgroundColor))
-      return selectionStyle.backgroundColor;
+    // 显式覆盖优先:浏览器**实际画出来**的选中色未必等于 CSS 里声明的那个值
+    // (用户实测:Chrome 把声明的 #3165cf 画成 #3264ce,凭空差了 1 个色阶 ——
+    //  合成器那套绘制/舍入我们复刻不出来)。想分毫不差,就用 --glass-selection-bg
+    //  写上"实际画出来的颜色"。
     const override = getSelectionColorOverride("--glass-selection-bg");
     if (override) return override;
+    if (!isTransparentColor(selectionStyle.backgroundColor))
+      return selectionStyle.backgroundColor;
     return getSystemHighlightColors().background;
   }
 
   // Chrome 对 ::selection 的 color 默认值返回的是**正文颜色**(不是 HighlightText),
   // 所以不能只看"是否透明":只有作者确实覆盖过(与正文色不同)才采用它。
   function resolveSelectionTextColor(selectionStyle, normalColor) {
+    const override = getSelectionColorOverride("--glass-selection-fg");
+    if (override) return override;
     const authored = selectionStyle.color;
     if (!isTransparentColor(authored) && authored !== normalColor)
       return authored;
-    const override = getSelectionColorOverride("--glass-selection-fg");
-    if (override) return override;
     return getSystemHighlightColors().text;
   }
 

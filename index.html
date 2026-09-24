@@ -26,6 +26,10 @@
     --header-item-shadow-y: 0px;
     --header-item-shadow-color: rgba(0,0,0,0.06);
     --refraction-opacity: 0.65;
+    /* 浏览器**实际画出来**的选中底色。CSS 里声明的是 #3165cf,但 Chrome 真正
+       刷上去的是 #3264ce(实测,差 1 个色阶)—— 玻璃读的是声明值,所以这里显式
+       给出实际值,玻璃里才能跟真实页面分毫不差。删掉这行则回退到 ::selection。 */
+    --glass-selection-bg: #3264ce;
   }
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
