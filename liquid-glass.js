@@ -49,6 +49,11 @@
     uniform float darkAmount;
     uniform vec2 viewportOffset;
     uniform float lineFieldOpacity;
+    // 表面白光散射(orbs)是否按内容饱和度衰减(<html data-glass-scatter-neutral>):
+    //   0(默认)= 原版,白光均匀叠加
+    //   >0     = 衰减指数:散射强度 × (1 - 饱和度)^指数
+    //            饱和的内容(选中蓝、彩色照片)不被白光冲淡,中性浅色上的散射照旧
+    uniform float scatterNeutral;
 
     float dither(vec2 pixelCoord) {
       int x = int(mod(pixelCoord.x, 8.0));
@@ -165,7 +170,17 @@
     vec3 applyOrbs(vec3 base, vec2 pixelCoord) {
       vec2 uv = (pixelCoord + viewportOffset) / backgroundResolution;
       vec4 orb = texture2D(orbTexture, clamp(uv, vec2(0.001), vec2(0.999)));
-      return mix(base, orb.rgb, orb.a);
+      float orbAlpha = orb.a;
+      if (scatterNeutral > 0.001) {
+        // 用 HSV 饱和度衡量"这个像素有多彩":越彩越不该被白光冲淡。
+        // 实测这块白光散射是玻璃里"颜色被抬亮"的唯一来源(选中蓝 #3264ce
+        // 经过它会变成 #3669d0),按饱和度衰减后平板色能回到原色。
+        float mx = max(max(base.r, base.g), base.b);
+        float mn = min(min(base.r, base.g), base.b);
+        float sat = mx > 0.001 ? (mx - mn) / mx : 0.0;
+        orbAlpha *= pow(max(0.0, 1.0 - sat), scatterNeutral);
+      }
+      return mix(base, orb.rgb, orbAlpha);
     }
 
     vec3 applyLineField(vec3 base, vec2 pixelCoord) {
@@ -1813,6 +1828,21 @@
     const value = parseFloat(root.dataset.glassSelectionPad || "");
     return Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 1;
   }
+  // 玻璃表面那层"柔和白光散射"(orbs)的强度倍率(<html data-glass-scatter>)。
+  // 实测它是玻璃里"颜色被抬亮"的唯一来源:选中蓝 #3264ce 透过去会变成
+  // #3669d0 / #396bd1(还会随时间波动,因为 orbs 是动画的)。
+  //   1 = 原版观感(默认);0 = 完全关掉 → 平板色分毫不差;中间值可折中。
+  function getScatterScale() {
+    const value = parseFloat(root.dataset.glassScatter || "");
+    return Number.isFinite(value) ? Math.min(Math.max(value, 0), 2) : 1;
+  }
+  // <html data-glass-scatter-neutral>:让白光散射按内容饱和度衰减 ——
+  // 值 = 衰减指数(1 = 线性,越大越狠)。饱和色(选中蓝、彩色照片)不被冲淡,
+  // 中性浅色上的玻璃散射感保持不变;0 / 不写 = 关掉(原版行为)。
+  function getScatterNeutralExponent() {
+    const value = parseFloat(root.dataset.glassScatterNeutral || "");
+    return Number.isFinite(value) ? Math.min(Math.max(value, 0), 6) : 0;
+  }
   // 替换元素被选中时:底色不透明(实测),图片内容再以这个透明度叠回去,
   // 于是"留白处是纯选中色、照片仍能隐约看见" —— 与 Chrome 的观感一致。
   const REPLACED_CONTENT_ALPHA = 0.34;
@@ -2706,6 +2736,7 @@
         darkAmount: gl.getUniformLocation(program, "darkAmount"),
         viewportOffset: gl.getUniformLocation(program, "viewportOffset"),
         lineFieldOpacity: gl.getUniformLocation(program, "lineFieldOpacity"),
+        scatterNeutral: gl.getUniformLocation(program, "scatterNeutral"),
       };
 
       texture = gl.createTexture();
@@ -3034,7 +3065,7 @@
       var ox = metrics.viewportWidth * (orb.x + orb.dx * waveA) * scaleX;
       var oy = metrics.viewportHeight * (orb.y + orb.dy * waveB) * scaleY;
       var or = baseRadius * orb.radius * scale;
-      var strength = paintState.refractionOpacity * orb.strength[0];
+      var strength = paintState.refractionOpacity * orb.strength[0] * getScatterScale();
       var cr = Math.round(orb.color[0] * 255);
       var cg = Math.round(orb.color[1] * 255);
       var cb = Math.round(orb.color[2] * 255);
@@ -3173,6 +3204,10 @@
     gl.uniform1f(locations.alphaBoost, options.alphaBoost);
     gl.uniform1f(locations.darkAmount, darkAmount);
     gl.uniform1f(locations.lineFieldOpacity, paintState.lineFieldOpacity || 0);
+    gl.uniform1f(
+      locations.scatterNeutral,
+      getScatterNeutralExponent(),
+    );
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     outputCtx.setTransform(1, 0, 0, 1, 0, 0);
@@ -3388,6 +3423,8 @@
     const initialDprLimit = root.dataset.glassDprLimit;
     let dprLimitRemembered = initialDprLimit !== undefined;
     const initialSelectionPad = root.dataset.glassSelectionPad;
+    const initialScatter = root.dataset.glassScatter;
+    const initialScatterNeutral = root.dataset.glassScatterNeutral;
 
     window.glassTune = (options) => {
       const list = hosts();
@@ -3399,6 +3436,11 @@
           "图片选中范围(<html>)":
             root.dataset.glassSelectionPad ??
             "(默认 1) 1=含 padding, 0=只内容盒",
+          "表面白光散射强度(<html>)":
+            root.dataset.glassScatter ?? "(默认 1) 0=关掉,颜色最准",
+          "散射按饱和度衰减(<html>)":
+            root.dataset.glassScatterNeutral ??
+            "(默认 0) >0 = 指数,饱和色不被白光冲淡",
         };
         list.forEach((host, index) => {
           out["宿主" + (list.length > 1 ? index : "") + " " + (host.className || host.tagName)] = read(host);
@@ -3421,6 +3463,12 @@
         if (initialSelectionPad !== undefined)
           root.dataset.glassSelectionPad = initialSelectionPad;
         else delete root.dataset.glassSelectionPad;
+        if (initialScatter !== undefined)
+          root.dataset.glassScatter = initialScatter;
+        else delete root.dataset.glassScatter;
+        if (initialScatterNeutral !== undefined)
+          root.dataset.glassScatterNeutral = initialScatterNeutral;
+        else delete root.dataset.glassScatterNeutral;
       } else {
         list.forEach((host) => {
           rememberInitial(host);
@@ -3443,6 +3491,22 @@
               delete root.dataset.glassSelectionPad;
             else
               root.dataset.glassSelectionPad = String(options.selectionPad);
+          }
+          if ("scatter" in options) {
+            if (options.scatter === null || options.scatter === undefined)
+              delete root.dataset.glassScatter;
+            else root.dataset.glassScatter = String(options.scatter);
+          }
+          if ("scatterNeutral" in options) {
+            if (
+              options.scatterNeutral === null ||
+              options.scatterNeutral === undefined
+            )
+              delete root.dataset.glassScatterNeutral;
+            else
+              root.dataset.glassScatterNeutral = String(
+                options.scatterNeutral,
+              );
           }
         });
       }
