@@ -18,7 +18,6 @@
     precision highp float;
 
     #define PI 3.141592653589793
-    #define disp 6.25
     #define Pow 3.0
     #define A 1.75
     #define B 1.25
@@ -35,6 +34,8 @@
     uniform vec2 textureOffset;
     uniform vec2 lightPos;
     uniform float glassBlur;
+    // 色散强度(设备像素):越大,R/B 通道被拉得越开,文字细笔画越容易被冲淡
+    uniform float dispersion;
     uniform float cornerRadius;
     uniform vec2 shapeSize;
     uniform float alphaBoost;
@@ -201,7 +202,7 @@
         int upsc = int(clamp(floor(12.0 * abs(1.0 - ref) + ditherValue), 1.0, 8.0));
 
         if (upsc < 2) {
-          float dsp = min(1.0, disp / glassRadius * (1.0 - ref));
+          float dsp = min(1.0, dispersion / glassRadius * (1.0 - ref));
           vec2 r_coord = pixelCoord - d * (1.0 - ref + dsp);
           vec2 g_coord = pixelCoord - d * (1.0 - ref);
           vec2 b_coord = pixelCoord - d * (1.0 - ref - dsp);
@@ -214,25 +215,25 @@
 
           dst = clamp(glassRadius + sdRoundBox(p + vec2(-0.5, -0.5), halfSize, radius), 0.0, glassRadius + 6.25);
           float ref_g0 = liquidRel(dst, glassRadius, glassBlur);
-          dsp = min(1.0, disp / glassRadius * (1.0 - ref_g0));
+          dsp = min(1.0, dispersion / glassRadius * (1.0 - ref_g0));
           float ref_r0 = ref_g0 - dsp;
           float ref_b0 = ref_g0 + dsp;
 
           dst = clamp(glassRadius + sdRoundBox(p + vec2(0.5, -0.5), halfSize, radius), 0.0, glassRadius + 6.25);
           float ref_g1 = liquidRel(dst, glassRadius, glassBlur);
-          dsp = min(1.0, disp / glassRadius * (1.0 - ref_g1));
+          dsp = min(1.0, dispersion / glassRadius * (1.0 - ref_g1));
           float ref_r1 = ref_g1 - dsp;
           float ref_b1 = ref_g1 + dsp;
 
           dst = clamp(glassRadius + sdRoundBox(p + vec2(-0.5, 0.5), halfSize, radius), 0.0, glassRadius + 6.25);
           float ref_g2 = liquidRel(dst, glassRadius, glassBlur);
-          dsp = min(1.0, disp / glassRadius * (1.0 - ref_g2));
+          dsp = min(1.0, dispersion / glassRadius * (1.0 - ref_g2));
           float ref_r2 = ref_g2 - dsp;
           float ref_b2 = ref_g2 + dsp;
 
           dst = clamp(glassRadius + sdRoundBox(p + vec2(0.5, 0.5), halfSize, radius), 0.0, glassRadius + 6.25);
           float ref_g3 = liquidRel(dst, glassRadius, glassBlur);
-          dsp = min(1.0, disp / glassRadius * (1.0 - ref_g3));
+          dsp = min(1.0, dispersion / glassRadius * (1.0 - ref_g3));
           float ref_r3 = ref_g3 - dsp;
           float ref_b3 = ref_g3 + dsp;
 
@@ -1505,31 +1506,71 @@
 
   // ===== 文本选中态 =====
   // 原生选区不在 DOM 里,也不体现在计算样式里(Chrome 的 ::selection 默认值
-  // 读到的是 transparent),它是合成器直接画的。所以镜像必须自己还原:
-  // 几何用 Range.getClientRects(),颜色优先取页面自定义的 ::selection,
-  // 否则取系统高亮色(CSS 的 Highlight 系统色关键字)。
-  let systemHighlightColor = null;
+  // 读到的是 transparent),它是合成器直接画的。所以必须自己还原两部分:
+  //   底色 —— Range.getClientRects() 取几何,颜色优先取页面自定义的 ::selection,
+  //           其次 --glass-selection-bg,最后系统高亮色(Highlight 系统色关键字)
+  //   文字 —— 真实选中会把选中文字换成 HighlightText(通常是白字),
+  //           这一步必须逐字重绘,否则玻璃里就是"蓝底深字",跟真实效果不一样
+  let systemHighlightColors = null;
 
-  function getSystemHighlightColor() {
-    if (systemHighlightColor) return systemHighlightColor;
+  function getSystemHighlightColors() {
+    if (systemHighlightColors) return systemHighlightColors;
 
-    let resolved = "";
+    let background = "";
+    let text = "";
     try {
       const probe = document.createElement("div");
       probe.setAttribute("aria-hidden", "true");
       probe.style.cssText =
-        "position:absolute;left:-9999px;top:-9999px;width:0;height:0;background-color:Highlight;";
+        "position:absolute;left:-9999px;top:-9999px;width:0;height:0;background-color:Highlight;color:HighlightText;";
       document.body.appendChild(probe);
-      resolved = getComputedStyle(probe).backgroundColor;
+      const probeStyle = getComputedStyle(probe);
+      background = probeStyle.backgroundColor;
+      text = probeStyle.color;
       probe.remove();
     } catch (error) {
-      resolved = "";
+      background = "";
+      text = "";
     }
 
-    systemHighlightColor = isTransparentColor(resolved)
-      ? "rgba(0, 120, 215, 0.85)"
-      : resolved;
-    return systemHighlightColor;
+    systemHighlightColors = {
+      background: isTransparentColor(background)
+        ? "rgba(0, 120, 215, 0.85)"
+        : background,
+      text: isTransparentColor(text) ? "#ffffff" : text,
+    };
+    return systemHighlightColors;
+  }
+
+  // 允许用 CSS 变量覆盖成浏览器实际画的那个颜色
+  // (不同平台 / 主题下 Chrome 画的选中色并不等于系统 Highlight 值)
+  function getSelectionColorOverride(name) {
+    try {
+      return (
+        getComputedStyle(root).getPropertyValue(name).trim() || ""
+      );
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function resolveSelectionBackground(element, selectionStyle) {
+    if (!isTransparentColor(selectionStyle.backgroundColor))
+      return selectionStyle.backgroundColor;
+    const override = getSelectionColorOverride("--glass-selection-bg");
+    if (override) return override;
+    return getSystemHighlightColors().background;
+  }
+
+  // Chrome 对 ::selection 的 color 默认值返回的是**正文颜色**(不是 HighlightText),
+  // 所以不能只看"是否透明":只有作者确实覆盖过(与正文色不同)才采用它。
+  function resolveSelectionTextColor(selectionStyle, normalColor) {
+    const authored = selectionStyle.color;
+    if (!isTransparentColor(authored) && authored !== normalColor)
+      return authored;
+    const override = getSelectionColorOverride("--glass-selection-fg");
+    if (override) return override;
+    return getSystemHighlightColors().text;
   }
 
   function collectSelectionRects() {
@@ -1549,9 +1590,7 @@
       if (!element || element.closest?.("[data-liquid-glass]")) continue;
 
       const selectionStyle = getComputedStyle(element, "::selection");
-      const background = isTransparentColor(selectionStyle.backgroundColor)
-        ? getSystemHighlightColor()
-        : selectionStyle.backgroundColor;
+      const background = resolveSelectionBackground(element, selectionStyle);
 
       const rects = range.getClientRects();
       for (let rectIndex = 0; rectIndex < rects.length; rectIndex += 1) {
@@ -1581,6 +1620,92 @@
       );
       ctx.restore();
     });
+  }
+
+  // 选区里被 Range 覆盖到的文本节点,以及需要重绘的字符区间
+  function collectSelectedTextNodes(range, element) {
+    const items = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !node.nodeValue.trim())
+          return NodeFilter.FILTER_REJECT;
+        return range.intersectsNode(node)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      },
+    });
+
+    let node = walker.nextNode();
+    while (node) {
+      const value = node.nodeValue || "";
+      const start = node === range.startContainer ? range.startOffset : 0;
+      const end =
+        node === range.endContainer ? range.endOffset : value.length;
+      if (end > start) items.push({ node, start, end });
+      node = walker.nextNode();
+    }
+    return items;
+  }
+
+  const SELECTION_TEXT_LIMIT = 400; // 逐字重绘的成本保护
+
+  // 把选中文字按高亮前景色重绘在最上层。
+  // 底色是不透明的,已经把快照/镜像里原来的文字盖掉了,所以这里直接重画即可。
+  function drawSelectionTextLayer(ctx, canvasRect, dpr) {
+    const selection = window.getSelection?.();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      const range = selection.getRangeAt(index);
+      if (range.collapsed) continue;
+
+      const container = range.commonAncestorContainer;
+      const element =
+        container.nodeType === 1 ? container : container.parentElement;
+      if (!element || element.closest?.("[data-liquid-glass]")) continue;
+
+      const selectedText = range.toString();
+      if (!selectedText || selectedText.length > SELECTION_TEXT_LIMIT) continue;
+
+      const style = getComputedStyle(element);
+      const selectionStyle = getComputedStyle(element, "::selection");
+      const color = resolveSelectionTextColor(selectionStyle, style.color);
+      // 前景色与正文一样(或取不到)就不需要重绘
+      if (color === style.color || isTransparentColor(color)) continue;
+
+      const nodes = collectSelectedTextNodes(range, element);
+      if (!nodes.length) continue;
+
+      ctx.save();
+      ctx.font = canvasFontFromStyle(style, dpr);
+      ctx.fillStyle = color;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      applyCanvasTextSpacing(ctx, style, dpr);
+      ctx.globalAlpha = getCompositedOpacity(element);
+
+      nodes.forEach((item) => {
+        const value = item.node.nodeValue || "";
+        for (let i = item.start; i < item.end; i += 1) {
+          const char = value[i];
+          if (!char || /\s/.test(char)) continue;
+          const charRange = document.createRange();
+          charRange.setStart(item.node, i);
+          charRange.setEnd(item.node, i + 1);
+          const rect = charRange.getBoundingClientRect();
+          charRange.detach?.();
+          if (!rect.width || !rect.height) continue;
+          if (!intersects(rect, canvasRect)) continue;
+          ctx.fillText(
+            char,
+            (rect.left - canvasRect.left) * dpr,
+            ((rect.top + rect.bottom) * 0.5 - canvasRect.top) * dpr,
+          );
+        }
+      });
+
+      ctx.restore();
+    }
   }
 
   // ===== 快照背景 =====
@@ -2008,6 +2133,9 @@
       drawTextElement(ctx, element, canvasRect, dpr, { precise: true });
     });
 
+    // 选中文字的高亮前景色(通常是白字)必须画在所有文字之上
+    drawSelectionTextLayer(ctx, canvasRect, dpr);
+
     drawCursorLayer(ctx, canvasRect, dpr);
   }
 
@@ -2163,10 +2291,13 @@
       host.getBoundingClientRect().height * 0.5,
     );
     const blur = parseCssLength(host.dataset.glassBlur || "", NaN);
+    const dispersion = parseFloat(host.dataset.glassDispersion || "");
 
     return {
       cornerRadius: radius,
       glassBlur: Number.isFinite(blur) ? blur : 20,
+      // 色散强度,默认 6.25(原值);调小 → 文字更实、彩边更少
+      dispersion: Number.isFinite(dispersion) ? dispersion : 6.25,
       alphaBoost: parseFloat(host.dataset.glassAlpha) || 1,
     };
   }
@@ -2326,6 +2457,7 @@
         textureOffset: gl.getUniformLocation(program, "textureOffset"),
         lightPos: gl.getUniformLocation(program, "lightPos"),
         glassBlur: gl.getUniformLocation(program, "glassBlur"),
+        dispersion: gl.getUniformLocation(program, "dispersion"),
         cornerRadius: gl.getUniformLocation(program, "cornerRadius"),
         shapeSize: gl.getUniformLocation(program, "shapeSize"),
         alphaBoost: gl.getUniformLocation(program, "alphaBoost"),
@@ -2746,6 +2878,7 @@
       shapeWidth * 0.5,
     );
     const glassBlur = options.glassBlur * dpr;
+    const dispersion = options.dispersion * dpr;
     const darkAmount = root.dataset.theme === "dark" ? 1 : 0;
 
     gl.viewport(0, 0, width, height);
@@ -2784,6 +2917,7 @@
     }
     gl.uniform2f(locations.lightPos, width * 0.25, height * 0.25);
     gl.uniform1f(locations.glassBlur, glassBlur);
+    gl.uniform1f(locations.dispersion, dispersion);
     gl.uniform1f(locations.cornerRadius, cornerRadius);
     gl.uniform2f(locations.shapeSize, shapeWidth, shapeHeight);
     gl.uniform1f(locations.alphaBoost, options.alphaBoost);

@@ -96,7 +96,9 @@ liquid-glass/
 | 属性 / 事件 | 作用域 | 说明 |
 | --- | --- | --- |
 | `data-liquid-glass` | 宿主元素 | 标记该元素使用液态玻璃,`liquid-glass.js` 会自动查找其中的 `.liquid-glass-canvas`。 |
-| `data-glass-blur` | 宿主元素 | 玻璃折射模糊半径(px),默认 `20`。 |
+| `data-glass-blur` | 宿主元素 | 玻璃折射模糊半径(px),默认 `20`。调小 → 折射范围更紧、文字更清晰。 |
+| `data-glass-dispersion` | 宿主元素 | 色散强度,默认 `6.25`(原版值)。它把 R/B 通道在折射方向上拉开,是文字边缘出现彩色描边的来源;想更"实"就调小,`0` 即关闭色散。 |
+| `--glass-selection-bg` / `--glass-selection-fg` | `:root` | 覆盖玻璃里还原出来的**选中底色 / 选中文字色**。默认自动取页面 `::selection`,没有则取系统 `Highlight` / `HighlightText`。不同平台 / 主题下浏览器画的选中色不一定等于系统色,对不上时用这两个变量写成实际颜色即可。 |
 | `data-glass-alpha` | 宿主元素 | 玻璃整体不透明度倍数,默认 `1`。 |
 | `data-glass-isolate="true"` | 宿主元素 | 隔离模式:只采集与宿主相交的内容,适合弹窗等悬浮面板。 |
 | `data-glass-capture` | `<html>` | 采集范围选择器;`all` / `*` 表示全页面,也可写自定义选择器(如 `.hero *`)。 |
@@ -139,6 +141,8 @@ liquid-glass/
 
 ## 更新日志
 
+- **选中态补齐高亮前景色**——真实选中会把选中文字换成 `HighlightText`(通常白字),之前只画了底色,玻璃里会是"蓝底深字"。现在逐字重绘选中文字(`Range` 逐字定位 + `drawSelectionTextLayer`),并把底色 / 前景色都做成可用 `--glass-selection-bg` / `--glass-selection-fg` 覆盖。注意 Chrome 对 `::selection` 的 `color` 默认返回的是**正文色**,所以只有当作者确实覆盖过(与正文色不同)时才采用它。
+- **新增 `data-glass-dispersion`**——把原来硬编码的 `#define disp 6.25` 改成 uniform,可调色散强度。实测全画面"强彩边像素"(R/B 通道差 > 25)随之为 640(默认 6.25)→ 455(3)→ 9(0),文字彩边可以按需压掉。
 - **文字排版修复**——`splitWrapUnits()` 之前只看"有没有空格",中西混排(如 `RGB 三通道…`)会把整段中文当成不可断行的单元,导致换行位置与浏览器不一致,超宽的行还会被 `fillText` 的 `maxWidth` 横向压扁。现在中文逐字断行、西文按单词断行,折行文本改走 `Range` 逐字测量还原浏览器真实行盒,并去掉 `maxWidth` 压缩。
 - **文本选中态还原**——原生选区不在 DOM 也不在计算样式里(Chrome 的 `::selection` 默认值是 `transparent`),新增选区层用 `Range.getClientRects()` 取几何 + 系统高亮色(`Highlight` 系统色关键字),并在 `selectionchange` 时重绘。
 - **新增快照背景**——`data-glass-backdrop="snapshot"` 让浏览器自己渲染静态层,解决伪元素 / 渐变文字 / 装饰线 / `white-space` / 阴影 / `transform` 等镜像重绘覆盖不到的 CSS;图片、视频、canvas、固定定位子树、选区、光标仍由覆盖层绘制,失败自动回退。
