@@ -1688,13 +1688,22 @@
         const padRight = parseCssLength(nodeStyle.paddingRight, 0);
         const padTop = parseCssLength(nodeStyle.paddingTop, 0);
         const padBottom = parseCssLength(nodeStyle.paddingBottom, 0);
+        // 选中范围:0 = 只内容盒(无头 Chrome 实测如此),1 = 边框盒(含 padding)。
+        // 不同浏览器/版本对"图片被选中"的覆盖范围不一样:那张 iPhone 图有
+        // padding:40px,若你的 Chrome 连 padding 一起刷,两侧留白就会比我们宽 40px
+        // → 用 data-glass-selection-pad 对齐你实际看到的范围。
+        const padScale = getSelectionPadScale();
+        const insetLeft = padLeft * (1 - padScale);
+        const insetRight = padRight * (1 - padScale);
+        const insetTop = padTop * (1 - padScale);
+        const insetBottom = padBottom * (1 - padScale);
         const rect = {
-          left: box.left + padLeft,
-          top: box.top + padTop,
-          right: box.right - padRight,
-          bottom: box.bottom - padBottom,
-          width: Math.max(0, box.width - padLeft - padRight),
-          height: Math.max(0, box.height - padTop - padBottom),
+          left: box.left + insetLeft,
+          top: box.top + insetTop,
+          right: box.right - insetRight,
+          bottom: box.bottom - insetBottom,
+          width: Math.max(0, box.width - insetLeft - insetRight),
+          height: Math.max(0, box.height - insetTop - insetBottom),
         };
         if (rect.width <= 0.5 || rect.height <= 0.5) return;
         // ★ 底色是**不透明**的(实测:内容盒留白处 Ctrl+A 后是 #3264ce ≈ 选中色本身),
@@ -1796,6 +1805,12 @@
   }
 
   const SELECTION_CHAR_BUDGET = 1500; // 每帧逐字重绘的字符预算(成本保护)
+  // 替换元素被选中时的覆盖范围:0 = 只内容盒,1 = 边框盒(含 padding)。
+  // 见 data-glass-selection-pad 的注释。
+  function getSelectionPadScale() {
+    const value = parseFloat(root.dataset.glassSelectionPad || "");
+    return Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 0;
+  }
   // 替换元素被选中时:底色不透明(实测),图片内容再以这个透明度叠回去,
   // 于是"留白处是纯选中色、照片仍能隐约看见" —— 与 Chrome 的观感一致。
   const REPLACED_CONTENT_ALPHA = 0.34;
@@ -3370,13 +3385,19 @@
     };
     const initialDprLimit = root.dataset.glassDprLimit;
     let dprLimitRemembered = initialDprLimit !== undefined;
+    const initialSelectionPad = root.dataset.glassSelectionPad;
 
     window.glassTune = (options) => {
       const list = hosts();
       if (!list.length) return "没有找到 [data-liquid-glass] 宿主";
 
       if (!options) {
-        const out = { "DPR 上限(<html>)": root.dataset.glassDprLimit ?? "(默认 1.25)" };
+        const out = {
+          "DPR 上限(<html>)": root.dataset.glassDprLimit ?? "(默认 1.25)",
+          "图片选中范围(<html>)":
+            root.dataset.glassSelectionPad ??
+            "(默认 0) 0=只内容盒, 1=含 padding",
+        };
         list.forEach((host, index) => {
           out["宿主" + (list.length > 1 ? index : "") + " " + (host.className || host.tagName)] = read(host);
         });
@@ -3395,6 +3416,9 @@
         });
         if (dprLimitRemembered) root.dataset.glassDprLimit = initialDprLimit;
         else delete root.dataset.glassDprLimit;
+        if (initialSelectionPad !== undefined)
+          root.dataset.glassSelectionPad = initialSelectionPad;
+        else delete root.dataset.glassSelectionPad;
       } else {
         list.forEach((host) => {
           rememberInitial(host);
@@ -3408,6 +3432,15 @@
             if (options.dprLimit === null || options.dprLimit === undefined)
               delete root.dataset.glassDprLimit;
             else root.dataset.glassDprLimit = String(options.dprLimit);
+          }
+          if ("selectionPad" in options) {
+            if (
+              options.selectionPad === null ||
+              options.selectionPad === undefined
+            )
+              delete root.dataset.glassSelectionPad;
+            else
+              root.dataset.glassSelectionPad = String(options.selectionPad);
           }
         });
       }
