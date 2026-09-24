@@ -1573,6 +1573,21 @@
     return getSystemHighlightColors().text;
   }
 
+  // 浏览器画的选中底色是**行盒**高度,而 Range.getClientRects() 给的是文字盒,
+  // 两者差的就是行距(本项目 21px vs 19px,差 2px)—— 不补上高度就会"被压缩"。
+  function expandSelectionRect(rect, lineHeight) {
+    if (!Number.isFinite(lineHeight) || lineHeight <= rect.height) return rect;
+    const extra = (lineHeight - rect.height) / 2;
+    return {
+      left: rect.left,
+      top: rect.top - extra,
+      right: rect.right,
+      bottom: rect.bottom + extra,
+      width: rect.width,
+      height: rect.height + extra * 2,
+    };
+  }
+
   function collectSelectionRects() {
     const selection = window.getSelection?.();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return [];
@@ -1591,12 +1606,13 @@
 
       const selectionStyle = getComputedStyle(element, "::selection");
       const background = resolveSelectionBackground(element, selectionStyle);
+      const lineHeight = parseFloat(getComputedStyle(element).lineHeight);
 
       const rects = range.getClientRects();
       for (let rectIndex = 0; rectIndex < rects.length; rectIndex += 1) {
         const rect = rects[rectIndex];
         if (rect.width <= 0.5 || rect.height <= 0.5) continue;
-        items.push({ rect, background });
+        items.push({ rect: expandSelectionRect(rect, lineHeight), background });
       }
     }
 
@@ -2910,18 +2926,22 @@
     gl.bindTexture(gl.TEXTURE_2D, lineTexture);
     gl.uniform1i(locations.lineTexture, 2);
     gl.uniform2f(locations.resolution, width, height);
+    // ★ 采样偏移必须取整:小数偏移会让 LINEAR 采样落在纹素之间 ——
+    //   拖动时画面发虚、边缘像在抖。取整后是 1:1 采样,又清晰又稳。
+    const sampleOffsetX = Math.round(rect.left * dpr);
+    const sampleOffsetY = Math.round(rect.top * dpr);
     if (item.localBackground) {
       gl.uniform2f(locations.backgroundResolution, width, height);
       gl.uniform2f(locations.textureOffset, 0, 0);
-      gl.uniform2f(locations.viewportOffset, rect.left * dpr, rect.top * dpr);
+      gl.uniform2f(locations.viewportOffset, sampleOffsetX, sampleOffsetY);
     } else {
       gl.uniform2f(
         locations.backgroundResolution,
         metrics.viewportWidth,
         metrics.viewportHeight,
       );
-      gl.uniform2f(locations.textureOffset, rect.left * dpr, rect.top * dpr);
-      gl.uniform2f(locations.viewportOffset, rect.left * dpr, rect.top * dpr);
+      gl.uniform2f(locations.textureOffset, sampleOffsetX, sampleOffsetY);
+      gl.uniform2f(locations.viewportOffset, sampleOffsetX, sampleOffsetY);
     }
     gl.uniform2f(locations.lightPos, width * 0.25, height * 0.25);
     gl.uniform1f(locations.glassBlur, glassBlur);
