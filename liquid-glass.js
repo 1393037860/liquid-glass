@@ -2436,6 +2436,15 @@
     render();
   }
 
+  // 丢弃已缓存的背景纹理,让下一帧用最新内容重绘并重新上传。
+  // 帧签名只覆盖滚动 / 尺寸 / 主题 / 配色,任何异步到达的绘制资源(图片、字体)
+  // 都必须主动失效,否则首次绘制时尚未加载完成的内容会被永久缓存下来。
+  function invalidateGlassFrame() {
+    underlyingCacheDirty = true;
+    frameSignature = "";
+    render();
+  }
+
   if (initRenderer()) {
     window.addEventListener("resize", render, { passive: true });
     mobileGlassQuery.addEventListener?.("change", () => {
@@ -2444,10 +2453,38 @@
     });
     window.addEventListener("scroll", renderForScroll, { passive: true });
     document.addEventListener("pdaim:liquid-refresh", () => {
-      underlyingCacheDirty = true;
-      frameSignature = "";
-      render();
+      invalidateGlassFrame();
     });
+
+    // 图片加载完成 / 加载失败时刷新背景缓存。
+    // 未加载完成的图片会被画成占位图(drawImageFallback),之前没有监听 load,
+    // 导致拖拽玻璃经过图片时一直显示占位图而不是真实图片。
+    // load / error 不冒泡,但捕获阶段会在 document 上收到。
+    document.addEventListener(
+      "load",
+      (event) => {
+        if (event.target instanceof HTMLImageElement) invalidateGlassFrame();
+      },
+      true,
+    );
+
+    document.addEventListener(
+      "error",
+      (event) => {
+        if (event.target instanceof HTMLImageElement) invalidateGlassFrame();
+      },
+      true,
+    );
+
+    // 字体延迟加载会改变文字排版,同样需要重绘,否则玻璃里保留备用字体的排版。
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(
+        () => invalidateGlassFrame(),
+        () => {},
+      );
+    }
+
+    // DOM 结构变化(增删节点)时刷新缓存
     new MutationObserver(() => {
       underlyingCacheDirty = true;
       frameSignature = "";

@@ -104,7 +104,7 @@ liquid-glass/
 | `data-liquid-glass` 上的 `border-radius` | CSS | 决定玻璃圆角;高度的一半即为胶囊形。 |
 | `pdaim:liquid-refresh` | 自定义事件 | 在 `document` 上派发该事件可强制刷新纹理缓存(动态增删内容后调用)。 |
 
-计算样式与 `MutationObserver` 已自动处理大部分 DOM 变化;内容结构大改时可手动派发刷新事件。
+计算样式、`MutationObserver` 与图片 / 字体的加载完成事件已自动处理大部分 DOM 变化;内容结构大改时可手动派发刷新事件。
 
 ## 技术原理简述
 
@@ -127,4 +127,5 @@ liquid-glass/
 
 ## 更新日志
 
+- **修复:拖拽玻璃经过图片时不显示真实图片**——背景纹理的帧签名只覆盖滚动 / 尺寸 / 主题 / 配色,图片在首次绘制时若尚未加载完成,就会被 `drawImageFallback` 的占位图画进纹理并永久缓存。现在监听图片的 `load` / `error` 与 `document.fonts.ready`,资源异步到达后自动失效缓存并重绘。
 - **初始版本**——液态玻璃 Header、玻璃弹窗、尺寸控制面板、拖拽移动、色散折射与 Bayer 抖动着色器。
