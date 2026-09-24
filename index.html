@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>液态玻璃 Demo</title>
+<style>
+  /* ===== 主题变量 ===== */
+  :root {
+    --bg: #f5f5f7;
+    --fg: #1d1d1f;
+    --muted: rgba(29, 29, 31, 0.6);
+    --line: rgba(29, 29, 31, 0.08);
+    --dot: rgba(29, 29, 31, 0.34);
+    --cursor: #007aff;
+    --cursor-text: #ffffff;
+    --control-glass-highlight: #ffffff;
+    --control-glass-shade: #000000;
+    --header-glass-before-opacity: 0;
+    --header-shadow-x: 0px;
+    --header-shadow-y: 0px;
+    --header-shadow-strong: rgba(0,0,0,0.06);
+    --header-shadow-mid: rgba(0,0,0,0.03);
+    --header-shadow-faint: rgba(0,0,0,0.01);
+    --header-item-shadow-x: 0px;
+    --header-item-shadow-y: 0px;
+    --header-item-shadow-color: rgba(0,0,0,0.06);
+    --refraction-opacity: 0.65;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    min-height: 200vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ===== 液态玻璃 Header ===== */
+  .site-header {
+    --glass-w: 800px;
+    --glass-h: 78px;
+    --glass-r: 9999px;
+    height: var(--glass-h);
+    width: min(calc(100% - 32px), var(--glass-w));
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 80;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 24px;
+    padding: 0 clamp(20px, 4vw, 58px);
+    border: 0;
+    border-radius: var(--glass-r);
+    background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
+    isolation: isolate;
+    overflow: visible;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+  .site-header.dragging {
+    cursor: grabbing;
+  }
+
+  .liquid-glass-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    border-radius: inherit;
+    contain: strict;
+  }
+
+  .site-header > .liquid-glass-canvas {
+    clip-path: none;
+  }
+
+  .site-header > .logo {
+    position: relative;
+    z-index: 5;
+    justify-self: center;
+    font-size: 22px;
+    font-weight: 900;
+    letter-spacing: 0.18em;
+    color: var(--fg);
+    text-decoration: none;
+  }
+
+  /* ===== 页面内容 ===== */
+  .hero {
+    padding: 200px 24px 60px;
+    text-align: center;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .hero h1 {
+    font-size: 52px;
+    font-weight: 800;
+    letter-spacing: -2px;
+    line-height: 1.1;
+    margin-bottom: 20px;
+    background: linear-gradient(135deg, #1d1d1f 0%, #636366 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .hero p {
+    font-size: 18px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 24px;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+
+  .card {
+    background: #fff;
+    border-radius: 20px;
+    padding: 32px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.04);
+  }
+
+  .card h3 {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+
+  .card p {
+    font-size: 14px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .card-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    margin-bottom: 16px;
+  }
+
+  .card-icon.blue   { background: #e8f4fd; color: #007aff; }
+  .card-icon.green  { background: #e6f9ed; color: #34c759; }
+  .card-icon.purple { background: #f0eaff; color: #af52de; }
+  .card-icon.orange { background: #fff3e0; color: #ff9500; }
+
+  .stripes {
+    display: flex;
+    gap: 12px;
+    max-width: 1100px;
+    margin: 0 auto 60px;
+    padding: 0 24px;
+    flex-wrap: wrap;
+  }
+  .stripe {
+    flex: 1;
+    min-width: 120px;
+    height: 6px;
+    border-radius: 3px;
+  }
+  .stripe:nth-child(1) { background: linear-gradient(90deg, #007aff, #5ac8fa); }
+  .stripe:nth-child(2) { background: linear-gradient(90deg, #34c759, #30d158); }
+  .stripe:nth-child(3) { background: linear-gradient(90deg, #ff9500, #ffcc00); }
+  .stripe:nth-child(4) { background: linear-gradient(90deg, #af52de, #e040fb); }
+  .stripe:nth-child(5) { background: linear-gradient(90deg, #ff3b30, #ff6482); }
+
+  /* 图片展示 */
+  .showcase {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 200px;
+    max-width: 1200px;
+    margin: 0 auto 80px;
+    padding: 0 40px;
+  }
+  .showcase-item {
+    background: #fff;
+    border-radius: 20px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.04);
+  }
+  .showcase-item img {
+    display: block;
+    width: 100%;
+    height: auto;
+    object-fit: cover;
+  }
+  .showcase-item.landscape img {
+    aspect-ratio: 16 / 9;
+  }
+  .showcase-item.product img {
+    aspect-ratio: 1 / 1;
+    object-fit: contain;
+    background: #fafafa;
+    padding: 40px;
+  }
+  .showcase-caption {
+    padding: 20px 24px;
+  }
+  .showcase-caption h3 {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .showcase-caption p {
+    font-size: 14px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  /* ===== 触发按钮 ===== */
+  .modal-trigger {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 90;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 22px;
+    border: 0;
+    border-radius: 999px;
+    background: #007aff;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 8px 24px rgba(0, 122, 255, 0.35);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .modal-trigger:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 30px rgba(0, 122, 255, 0.45);
+  }
+  .modal-trigger:active {
+    transform: translateY(0);
+  }
+
+  /* ===== 液态玻璃弹窗 ===== */
+  .glass-modal {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(calc(100% - 48px), 520px);
+    height: 380px;
+    z-index: 100;
+    display: none;
+    border-radius: 24px;
+    background: transparent;
+    isolation: isolate;
+    overflow: visible;
+  }
+  .glass-modal.open {
+    display: block;
+  }
+  .glass-modal .liquid-glass-canvas {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    border-radius: inherit;
+  }
+  .glass-modal-content {
+    position: relative;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 40px 44px;
+    box-sizing: border-box;
+  }
+  .glass-modal-content h2 {
+    font-size: 24px;
+    font-weight: 800;
+    margin-bottom: 12px;
+  }
+  .glass-modal-content p {
+    font-size: 15px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .modal-close {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    z-index: 6;
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.08);
+    color: #333;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  /* ===== 控制面板 ===== */
+  .control-panel {
+    position: fixed;
+    left: 24px;
+    bottom: 24px;
+    z-index: 90;
+    width: 280px;
+    padding: 18px 20px;
+    border-radius: 16px;
+    background: #fff;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .control-panel h4 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: #333;
+  }
+  .control-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .control-row label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #666;
+  }
+  .control-row label output {
+    font-weight: 600;
+    color: #007aff;
+    font-variant-numeric: tabular-nums;
+  }
+  .control-row input[type="range"] {
+    width: 100%;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: #e5e5ea;
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+  .control-row input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #007aff;
+    border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+    cursor: pointer;
+  }
+
+  @media (max-width: 720px) {
+    .showcase { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+  <!-- ===== 液态玻璃 Header ===== -->
+  <header class="site-header" data-liquid-glass="" aria-label="导航">
+    <canvas class="liquid-glass-canvas" aria-hidden="true"></canvas>
+  </header>
+
+  <!-- ===== 页面内容 ===== -->
+  <main>
+    <section class="hero">
+      <h1>液态玻璃效果</h1>
+      <p>基于 WebGL 着色器的 iOS 风格液态玻璃，色散折射 + SDF 距离场 + Bayer 抖动。</p>
+    </section>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-icon blue">&#9889;</div>
+        <h3>色散折射</h3>
+        <p>RGB 三通道以不同偏移量采样背景纹理，模拟光线穿过玻璃时的色散。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon green">&#127752;</div>
+        <h3>动态光斑</h3>
+        <p>5 个彩色 Orb 纹理随时间飘移，通过径向渐变叠加产生流动的光影。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon purple">&#128161;</div>
+        <h3>Bayer 抖动</h3>
+        <p>8×8 Bayer 矩阵消除色带，在有限精度下实现平滑的渐变过渡。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon orange">&#9201;</div>
+        <h3>SDF 距离场</h3>
+        <p>有符号距离场精确计算圆角矩形边缘，实现光线折射和高光反射。</p>
+      </div>
+    </div>
+
+    <div class="stripes">
+      <div class="stripe"></div>
+      <div class="stripe"></div>
+      <div class="stripe"></div>
+      <div class="stripe"></div>
+      <div class="stripe"></div>
+    </div>
+
+    <div class="showcase">
+      <div class="showcase-item landscape">
+        <img src="img/26-Tahoe-Beach-Day.png" alt="Tahoe 海滩" loading="lazy">
+        <div class="showcase-caption">
+          <h3>Tahoe 海滩</h3>
+          <p>自然风光在液态玻璃下的折射模拟，水体与天空的色彩变化。</p>
+        </div>
+      </div>
+      <div class="showcase-item product">
+        <img src="img/iPhoneXSMaxGold.png" alt="iPhone XS Max 金色" loading="lazy">
+        <div class="showcase-caption">
+          <h3>iPhone XS Max</h3>
+          <p>产品图在玻璃材质上的折射表现，金属质感与光影细节。</p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ===== 控制面板 ===== -->
+  <div class="control-panel" id="controlPanel">
+    <h4>Header 尺寸调节</h4>
+    <div class="control-row">
+      <label>宽度 <output id="widthVal">800px</output></label>
+      <input type="range" id="widthSlider" min="200" max="1200" step="10" value="800">
+    </div>
+    <div class="control-row">
+      <label>高度 <output id="heightVal">78px</output></label>
+      <input type="range" id="heightSlider" min="40" max="200" step="2" value="78">
+    </div>
+    <div class="control-row">
+      <label>圆角 <output id="radiusVal">999px</output></label>
+      <input type="range" id="radiusSlider" min="0" max="999" step="1" value="999">
+    </div>
+  </div>
+
+  <!-- ===== 触发按钮 ===== -->
+  <button class="modal-trigger" id="modalTrigger" type="button">打开弹窗</button>
+
+  <!-- ===== 液态玻璃弹窗 ===== -->
+  <div class="glass-modal" id="glassModal" data-liquid-glass="">
+    <canvas class="liquid-glass-canvas" aria-hidden="true"></canvas>
+    <div class="glass-modal-content">
+      <h2>液态玻璃弹窗</h2>
+      <p>这是一个使用 WebGL 液态玻璃折射的弹窗。滚动页面，观察内容经过玻璃时的色散折射效果。</p>
+    </div>
+    <button class="modal-close" id="modalClose" type="button" aria-label="关闭">&times;</button>
+  </div>
+
+<script src="liquid-glass.js"></script>
+<script>
+  (function () {
+    var modal = document.getElementById("glassModal");
+    var trigger = document.getElementById("modalTrigger");
+    var close = document.getElementById("modalClose");
+
+    function open() {
+      modal.classList.add("open");
+      document.dispatchEvent(new Event("pdaim:liquid-refresh"));
+    }
+    function closeModal() {
+      modal.classList.remove("open");
+      document.dispatchEvent(new Event("pdaim:liquid-refresh"));
+    }
+
+    trigger.addEventListener("click", open);
+    close.addEventListener("click", closeModal);
+
+    // ===== Header 尺寸调节 =====
+    var header = document.querySelector(".site-header");
+    var widthSlider = document.getElementById("widthSlider");
+    var heightSlider = document.getElementById("heightSlider");
+    var radiusSlider = document.getElementById("radiusSlider");
+    var widthVal = document.getElementById("widthVal");
+    var heightVal = document.getElementById("heightVal");
+    var radiusVal = document.getElementById("radiusVal");
+
+    var sizeRaf = null;
+    function applySize() {
+      var w = widthSlider.value;
+      var h = heightSlider.value;
+      var r = radiusSlider.value;
+      widthVal.textContent = w + "px";
+      heightVal.textContent = h + "px";
+      radiusVal.textContent = r + "px";
+      if (sizeRaf) return;
+      sizeRaf = requestAnimationFrame(function () {
+        sizeRaf = null;
+        header.style.setProperty("--glass-w", w + "px");
+        header.style.setProperty("--glass-h", h + "px");
+        header.style.setProperty("--glass-r", r + "px");
+      });
+    }
+
+    widthSlider.addEventListener("input", applySize);
+    heightSlider.addEventListener("input", applySize);
+    radiusSlider.addEventListener("input", applySize);
+
+    // ===== Header 拖拽移动 =====
+    var isDragging = false;
+    var dragStartX = 0;
+    var dragStartY = 0;
+    var headerStartLeft = 0;
+    var headerStartTop = 0;
+
+    header.addEventListener("pointerdown", function (e) {
+      isDragging = true;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+      var rect = header.getBoundingClientRect();
+      headerStartLeft = rect.left + rect.width / 2;
+      headerStartTop = rect.top + rect.height / 2;
+      header.style.left = headerStartLeft + "px";
+      header.style.top = headerStartTop + "px";
+      header.classList.add("dragging");
+      header.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+
+    header.addEventListener("pointermove", function (e) {
+      if (!isDragging) return;
+      var dx = e.clientX - dragStartX;
+      var dy = e.clientY - dragStartY;
+      header.style.left = (headerStartLeft + dx) + "px";
+      header.style.top = (headerStartTop + dy) + "px";
+    });
+
+    function endDrag(e) {
+      if (!isDragging) return;
+      isDragging = false;
+      header.classList.remove("dragging");
+      if (header.hasPointerCapture(e.pointerId)) {
+        header.releasePointerCapture(e.pointerId);
+      }
+    }
+
+    header.addEventListener("pointerup", endDrag);
+    header.addEventListener("pointercancel", endDrag);
+  })();
+</script>
+</body>
+</html>
